@@ -827,7 +827,7 @@ feature or model.
 |---|---|
 | Per-rule regulatory citations (BSA, FATF, FinCEN), threshold justification, worked examples | [AML_LOGIC.md](AML_LOGIC.md) |
 | Dataset sources, licences, canonical schema, field-by-field preprocessing, synthetic generation parameters | [DATA_CARD.md](DATA_CARD.md) |
-| The frozen interface contracts in full | [docs/CONTRACTS.md](docs/CONTRACTS.md) |
+| The frozen interface contracts in full | [docs/CONTRACTS.md](CONTRACTS.md) |
 | Agent-design rationale and component sequences | [ARCHITECTURE.md](ARCHITECTURE.md) |
-| Project overview, setup, quantitative results, limitations | [README.md](README.md) |
+| Project overview, setup, quantitative results, limitations | [README.md](../README.md) |
 | Build history and the two-person parallel-build protocol | [TRACK_A_PROGRESS.md](TRACK_A_PROGRESS.md), [WORKPLAN.md](WORKPLAN.md) |

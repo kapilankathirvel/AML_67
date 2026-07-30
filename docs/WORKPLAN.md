@@ -5,7 +5,7 @@
 
 > **If you were just sent this file:** read §1 (your track), §2 (the rules that stop us breaking each
 > other's code), §3 (paste-ready instruction for your coding agent), then §6 (your hour-by-hour tasks).
-> The interface you code against is in [docs/CONTRACTS.md](docs/CONTRACTS.md) — that's the only other file
+> The interface you code against is in [docs/CONTRACTS.md](CONTRACTS.md) — that's the only other file
 > you need.
 
 ---
@@ -181,7 +181,7 @@ writing the contract simultaneously is exactly the conflict we're designing away
 1. **First 15 minutes:** create the public GitHub repo, push the folder skeleton. Commit history is graded —
    start it immediately, not at hour 30.
 2. Write, in this order:
-   - `backend/schemas.py` — all Pydantic models (see [docs/CONTRACTS.md](docs/CONTRACTS.md))
+   - `backend/schemas.py` — all Pydantic models (see [docs/CONTRACTS.md](CONTRACTS.md))
    - `backend/tools/base.py` — `ToolContext`, `ToolResult`, the `@tool` decorator
    - `backend/agent/registry.py` — **auto-discovery** via `pkgutil.iter_modules` over `backend/tools/`
    - `backend/tools/_mocks.py` — one mock per tool name, returning plausible fixture data
@@ -262,7 +262,7 @@ collects every function carrying `@tool`. **B adds a tool by editing a file B al
 **H2–H8 · Data foundation**
 - Download the Kaggle sets (IBM AML **HI-Small**, sample ~200k rows; PaySim as secondary).
 - `data_loader.py` — adapters mapping IBM / PaySim / synthetic → **the canonical schema** in
-  [docs/CONTRACTS.md](docs/CONTRACTS.md). This adapter layer is what lets you swap datasets later without
+  [docs/CONTRACTS.md](CONTRACTS.md). This adapter layer is what lets you swap datasets later without
   touching any detection code.
 - `generate_synthetic.py` — fixed seed, labelled cohorts: structuring customers, smurfing rings, layering
   chains, rapid-cash-out, plus a large normal population. **Log every parameter you choose** (ring sizes,

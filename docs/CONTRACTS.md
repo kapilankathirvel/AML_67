@@ -6,7 +6,7 @@ Both tracks code against this file. It is the whole seam between Track A (agent 
 > **Frozen means:** `backend/schemas.py`, `backend/tools/base.py`, and this document are read-only ground
 > truth for everyone except their owner (Track A). Changing them after the kickoff hour requires **both
 > people present** — A edits, pushes straight to `main`, tells B, B rebases before continuing.
-> See [../WORKPLAN.md](../WORKPLAN.md) §4.
+> See [../WORKPLAN.md](WORKPLAN.md) §4.
 
 **The one architectural rule that keeps the tracks independent:**
 dependencies flow **agent → tools, never the reverse.**
@@ -304,7 +304,7 @@ saying the intent was unclear and what was assumed.
 - `filter_data` returned 0 rows → stop, return a `summary` explaining which filter emptied the set
 
 This table is the specification of the project's core claim. The plan-divergence test in
-[../WORKPLAN.md](../WORKPLAN.md) §8 asserts it holds.
+[../WORKPLAN.md](WORKPLAN.md) §8 asserts it holds.
 
 ---
 

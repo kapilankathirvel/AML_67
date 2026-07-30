@@ -1,6 +1,6 @@
 # ARCHITECTURE.md — Agent Design Detail
 
-Companion to [README.md](README.md) (the pitch) and [docs/CONTRACTS.md](docs/CONTRACTS.md) (the frozen
+Companion to [README.md](../README.md) (the pitch) and [docs/CONTRACTS.md](CONTRACTS.md) (the frozen
 interface, written first and unchanged in spirit throughout the build). This file explains *how* the
 pieces fit together and *why* they're shaped the way they are.
 
@@ -77,7 +77,7 @@ Key design points:
 ### 2. Planner (`backend/agent/planner.py`)
 
 `QueryIntent → ExecutionPlan`. One branch per intent, implementing the mapping table in
-[docs/CONTRACTS.md](docs/CONTRACTS.md) Contract 4 exactly. Every `ToolCall` carries a `reason`; every
+[docs/CONTRACTS.md](CONTRACTS.md) Contract 4 exactly. Every `ToolCall` carries a `reason`; every
 tool *not* included carries an entry in `tools_considered_but_skipped` with its own reason — this list is
 what makes "the agent decided, it didn't just run a pipeline" a checkable claim rather than a marketing
 line.
@@ -202,6 +202,6 @@ narrate → dozens of Flags across HIGH/MEDIUM/LOW, each with its own evidence-b
 
 - **Rule definitions, thresholds, regulatory justification**: [AML_LOGIC.md](AML_LOGIC.md)
 - **Dataset schema, sources, synthetic generation logic**: [DATA_CARD.md](DATA_CARD.md)
-- **The full frozen interface**: [docs/CONTRACTS.md](docs/CONTRACTS.md)
+- **The full frozen interface**: [docs/CONTRACTS.md](CONTRACTS.md)
 - **Build history, what was fixed and why, test counts over time**: [TRACK_A_PROGRESS.md](TRACK_A_PROGRESS.md)
 - **The two-person parallel-build plan this repo followed**: [WORKPLAN.md](WORKPLAN.md)

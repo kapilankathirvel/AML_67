@@ -1,7 +1,7 @@
 # CLAUDE.md — instructions for coding agents working in this repo
 
 This repo is being built by two people in parallel: **Track A** (agent core + API) and **Track B**
-(data, detection, UI). See [WORKPLAN.md](WORKPLAN.md) for the full plan and
+(data, detection, UI). See [WORKPLAN.md](docs/WORKPLAN.md) for the full plan and
 [docs/CONTRACTS.md](docs/CONTRACTS.md) for the frozen interface both tracks code against.
 
 ## File ownership — the rule that prevents merge conflicts
@@ -21,8 +21,8 @@ Every file has exactly one owner (full matrix in `WORKPLAN.md` §4). Whichever t
 
 ## Behavioural rules
 
-Also read and follow **[ANTI_HALLUCINATION_A.md](ANTI_HALLUCINATION_A.md)** if you are working Track A,
-or **[ANTI_HALLUCINATION_B.md](ANTI_HALLUCINATION_B.md)** if you are working Track B. In short: do only
+Also read and follow **[ANTI_HALLUCINATION_A.md](docs/ANTI_HALLUCINATION_A.md)** if you are working Track A,
+or **[ANTI_HALLUCINATION_B.md](docs/ANTI_HALLUCINATION_B.md)** if you are working Track B. In short: do only
 the requested task, do not redesign architecture, do not touch files outside the requested scope, do not
 invent contract fields, and ask rather than guess when information is missing.
 

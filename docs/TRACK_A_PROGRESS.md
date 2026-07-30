@@ -1,7 +1,7 @@
 # TRACK A — Progress & Resume State
 
 **Purpose:** if this project is picked back up later (by you or by a fresh coding-agent session), read
-**only this file** plus [TRACK_A_ROADMAP.md](TRACK_A_ROADMAP.md) and [docs/CONTRACTS.md](docs/CONTRACTS.md).
+**only this file** plus [TRACK_A_ROADMAP.md](TRACK_A_ROADMAP.md) and [docs/CONTRACTS.md](CONTRACTS.md).
 Do not re-read the whole codebase to figure out where things stand — this file is kept accurate for
 exactly that reason. Update it every time you finish a subtask or make a decision, not just at hour
 boundaries.

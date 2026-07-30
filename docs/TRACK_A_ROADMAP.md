@@ -1,7 +1,7 @@
 # TRACK A — Phase-by-Phase Implementation Roadmap
 
 Agent core, LLM, API. Companion to [WORKPLAN.md](WORKPLAN.md) (task assignment + ownership) and
-[docs/CONTRACTS.md](docs/CONTRACTS.md) (the frozen interface). This file is the **detailed execution
+[docs/CONTRACTS.md](CONTRACTS.md) (the frozen interface). This file is the **detailed execution
 plan** — WORKPLAN.md tells you what hour to be on which file; this tells you exactly what to build in it.
 
 **For day-to-day resume/status, use [TRACK_A_PROGRESS.md](TRACK_A_PROGRESS.md) instead of this file** —
@@ -87,7 +87,7 @@ plan-divergence assertions, all passing.
 ---
 
 Goal (reference, already met): `QueryIntent` → `ExecutionPlan` that exactly matches the mapping table in
-[docs/CONTRACTS.md](docs/CONTRACTS.md) Contract 4.
+[docs/CONTRACTS.md](CONTRACTS.md) Contract 4.
 
 **Files:** `backend/agent/planner.py`, `tests/test_planner.py`
 

@@ -52,7 +52,7 @@ explainable enough for a human analyst to trust and act on.
 - **SARs** (Suspicious Activity Reports, FinCEN Form 114) are filed regardless of amount when laundering
   is suspected — our agent drafts one automatically for every `HIGH`-risk flag.
 
-Full regulatory citations, per-rule thresholds, and business justification: **[AML_LOGIC.md](AML_LOGIC.md)**.
+Full regulatory citations, per-rule thresholds, and business justification: **[AML_LOGIC.md](docs/AML_LOGIC.md)**.
 
 ## Solution approach
 
@@ -121,10 +121,13 @@ TOOL LAYER (backend/tools/)
 AgentResponse (JSON) → FastAPI → HTTP → Streamlit UI
 ```
 
-Component detail, the full Pydantic contract, and sequence diagrams: **[ARCHITECTURE.md](ARCHITECTURE.md)**.
+**Full technical documentation — architecture, analysis algorithms, and UI design in one place:
+[DOCUMENTATION.md](docs/DOCUMENTATION.md).**
+
+Component detail, the full Pydantic contract, and sequence diagrams: **[ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
 The frozen interface both halves of this project are built against: **[docs/CONTRACTS.md](docs/CONTRACTS.md)**.
 The two-person parallel build plan (for context on how this repo came together):
-**[WORKPLAN.md](WORKPLAN.md)**.
+**[WORKPLAN.md](docs/WORKPLAN.md)**.
 
 ## Repo structure
 
@@ -163,12 +166,17 @@ soc/
 │   ├── build_ibm_cache.py        # optional: real IBM Kaggle dataset → canonical schema
 │   └── adapters/                  # per-source schema adapters
 ├── tests/                          # pytest — planner, executor, rules, ML, no-label-leakage, API, ...
-├── docs/
+├── docs/                            # all project documentation
 │   ├── CONTRACTS.md               # FROZEN — the interface Track A and Track B build against
-│   └── screenshots/                # images referenced from this README
+│   ├── DOCUMENTATION.md            # full technical documentation (architecture + algorithms + UI)
+│   ├── ARCHITECTURE.md             # agent design detail and component sequences
+│   ├── AML_LOGIC.md                # rule definitions, thresholds, regulatory justification
+│   ├── DATA_CARD.md                # dataset sources, schema, preprocessing decisions
+│   ├── WORKPLAN.md                 # the two-person parallel build plan
+│   └── TRACK_A_*.md, ANTI_HALLUCINATION_*.md, OLLAMA_SETUP_MAC.md
 ├── run_demo.py                     # starts backend + frontend, opens the browser
 ├── requirements.txt / requirements-data.txt
-└── README.md, ARCHITECTURE.md, WORKPLAN.md, AML_LOGIC.md, DATA_CARD.md, ...
+└── README.md, CLAUDE.md            # the only markdown kept at repo root
 ```
 
 ## Tech stack
@@ -187,13 +195,13 @@ soc/
 | Dataset | Role | Source | License / citation |
 |---|---|---|---|
 | **IBM Transactions for AML** (HI-Small) | Primary real-world base | [Kaggle: ealtman2019/ibm-transactions-for-anti-money-laundering-aml](https://www.kaggle.com/datasets/ealtman2019/ibm-transactions-for-anti-money-laundering-aml) | Altman, Baeck, Gerlach — "Realistic Synthetic Financial Transactions for Anti-Money Laundering Models," NeurIPS 2023 Datasets and Benchmarks |
-| **Synthetic overlay** (`data/sample/aml_sample.csv`) | Original committed demo dataset — guarantees structuring/smurfing/layering/rapid-cashout patterns are present and labelled, no Kaggle download required to run the demo | `data/generate_synthetic.py`, fixed seed (42) | Ours — full schema, field definitions, and generation logic documented in [DATA_CARD.md](DATA_CARD.md) |
+| **Synthetic overlay** (`data/sample/aml_sample.csv`) | Original committed demo dataset — guarantees structuring/smurfing/layering/rapid-cashout patterns are present and labelled, no Kaggle download required to run the demo | `data/generate_synthetic.py`, fixed seed (42) | Ours — full schema, field definitions, and generation logic documented in [DATA_CARD.md](docs/DATA_CARD.md) |
 | **Alt-schema synthetic dataset** (`data/sample/aml_sample_alt.csv`, 1,710 transactions / 294 customers) | **Default dataset the live agent actually queries** (`load_data`'s `source` parameter defaults to `"synthetic_alt"` — see `backend/tools/data_loader.py`). Same laundering typologies as the original synthetic set, but generated with a deliberately different raw schema (renamed headers, coded enums, `ACC-`-prefixed account IDs, no `is_cross_border` column) to prove the canonical-schema adapter (`docs/CONTRACTS.md` Contract 0) generalises to a raw format it wasn't hand-fit to, rather than being hardcoded to one CSV's column names | `data/generate_synthetic_alt.py`, fixed seed | Ours |
 
 All three are adapted into one canonical schema (`docs/CONTRACTS.md` Contract 0) before any detection code
 touches them — the datasets are fully swappable via `load_data(source=...)` (`'ibm'`, `'ibm_stratified'`,
 `'synthetic'`, or `'synthetic_alt'`). Full field-by-field preprocessing decisions, raw dataset statistics,
-and every assumption made by each synthetic generator: **[DATA_CARD.md](DATA_CARD.md)**.
+and every assumption made by each synthetic generator: **[DATA_CARD.md](docs/DATA_CARD.md)**.
 
 ## Setup
 
@@ -227,11 +235,11 @@ template text is already accurate).
 
 **To use a local LLM instead (no key, no quota at all)**: set `LLM_PROVIDER=ollama` after installing
 [Ollama](https://ollama.com/download) and pulling a model (`ollama pull qwen2.5:7b-instruct`). See
-[OLLAMA_SETUP_MAC.md](OLLAMA_SETUP_MAC.md) for Mac-specific setup; the same `LLM_PROVIDER=ollama` works
+[OLLAMA_SETUP_MAC.md](docs/OLLAMA_SETUP_MAC.md) for Mac-specific setup; the same `LLM_PROVIDER=ollama` works
 identically on Windows/Linux once Ollama is installed there.
 
 **To download the real IBM Kaggle dataset instead of the synthetic one**, `kaggle`/`kagglehub` credentials
-are required — see [DATA_CARD.md](DATA_CARD.md) §1.1.
+are required — see [DATA_CARD.md](docs/DATA_CARD.md) §1.1.
 
 **Manual start** (equivalent to `run_demo.py`, useful for separate terminals / debugging):
 ```bash
@@ -266,7 +274,7 @@ explanation, and (for `HIGH` risk) a SAR draft.
 ## Results
 
 Rule thresholds and their regulatory justification are documented per-rule in
-[AML_LOGIC.md](AML_LOGIC.md) — e.g. R1 (structuring) requires **3 transactions in a 7-day window** in the
+[AML_LOGIC.md](docs/AML_LOGIC.md) — e.g. R1 (structuring) requires **3 transactions in a 7-day window** in the
 $9,000–$9,999.99 band, which is what separates it from a naive "flag any transaction over $9,000" rule
 (the latter would flag every legitimate large transaction; ours requires a *pattern*, corroborated further
 by the ML anomaly score before reaching `HIGH`/SAR territory — see Contract 5's fusion formula).
@@ -275,7 +283,7 @@ by the ML anomaly score before reaching `HIGH`/SAR territory — see Contract 5'
 
 Computed against the original synthetic dataset's ground truth (`data/sample/aml_sample.csv`'s
 `label_is_laundering` field — 202 of 2,002 transactions, injected by the generator across the
-structuring/smurfing/rapid-cashout/layering cohorts; see [DATA_CARD.md](DATA_CARD.md)). Not validated
+structuring/smurfing/rapid-cashout/layering cohorts; see [DATA_CARD.md](docs/DATA_CARD.md)). Not validated
 against the raw IBM Kaggle dataset — that requires a Kaggle download not run in this environment; the
 synthetic set is the labelled ground truth actually available here.
 
@@ -287,7 +295,7 @@ synthetic set is the labelled ground truth actually available here.
 to the customer level: a customer is a true positive if they are the **sender** of at least one labelled
 transaction (51 of 270 customers) — chosen because our rules evaluate sender-side behavior (structuring,
 fan-out, self-deviation), not because it's the number that looks best. The naive baseline
-([AML_LOGIC.md](AML_LOGIC.md) §6: "flag any transaction with `amount > $9,000`") is translated the same
+([AML_LOGIC.md](docs/AML_LOGIC.md) §6: "flag any transaction with `amount > $9,000`") is translated the same
 way, to a fair customer-level comparison: any customer who sent at least one such transaction.
 
 | | Flagged | Precision | Recall | False-positive rate |
@@ -338,7 +346,7 @@ generator doesn't inject cohorts for those two patterns, so they're implemented 
   the natural next step.
 - Batch analysis over a sample dataset, not live streaming — explicitly in scope per the brief.
 - Synthetic data documents its own generation assumptions (seed, thresholds, ring sizes) in
-  [DATA_CARD.md](DATA_CARD.md) — real-world deployment would need those revalidated against production
+  [DATA_CARD.md](docs/DATA_CARD.md) — real-world deployment would need those revalidated against production
   transaction volumes and patterns.
 
 ## Team
@@ -348,4 +356,4 @@ generator doesn't inject cohorts for those two patterns, so they're implemented 
   
 
 Full division of labour, ownership matrix, and the anti-merge-conflict protocol used to build this in
-parallel: **[WORKPLAN.md](WORKPLAN.md)**.
+parallel: **[WORKPLAN.md](docs/WORKPLAN.md)**.
