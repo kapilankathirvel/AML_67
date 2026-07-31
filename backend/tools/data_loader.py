@@ -751,8 +751,9 @@ def _validate_canonical(tx_df: pd.DataFrame, cust_df: pd.DataFrame) -> list[str]
     },
     description=(
         "Load a dataset and convert it to the canonical transactions + customers schema "
-        "(Contract 0, docs/CONTRACTS.md).  Returns ToolResult with df=transactions_df "
-        "and artifacts['customers']=customers_df."
+        "(Contract 0, docs/CONTRACTS.md).  Returns ToolResult with df=transactions_df, "
+        "artifacts['customers']=customers_df and artifacts['transactions_reference']="
+        "the unfiltered transactions, which ml_detect ranks percentiles against."
     ),
 )
 def load_data(
@@ -903,7 +904,11 @@ def load_data(
         return ToolResult(
             ok=True,
             df=tx_df,
-            artifacts={"customers": cust_df},
+            # transactions_reference is the population ml_detect ranks against. It is
+            # captured here, before filter_data can narrow ctx.df, so an entity's
+            # anomaly percentile is a property of the customer rather than of whatever
+            # filters the analyst happened to type. Nothing may mutate it in place.
+            artifacts={"customers": cust_df, "transactions_reference": tx_df},
             metrics={
                 "txn_count": len(tx_df),
                 "customer_count": len(cust_df),

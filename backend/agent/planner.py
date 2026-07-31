@@ -79,9 +79,19 @@ def build_plan(intent: QueryIntent) -> ExecutionPlan:
             pattern_types=intent.pattern_types)
         add("rule_detect", "check all entities against rule-based detectors; result is filtered to this entity after",
             patterns=intent.pattern_types)
+        # ml_detect used to be skipped here as "one entity is too small a sample".
+        # That reasoning was wrong about this very plan: feature_engineer above runs
+        # across the whole population precisely so the score is comparable, so
+        # ml_detect receives the full customer set, not one row. Skipping it zeroed
+        # the ML term and made every single-entity query score 100*0.6*max_weight —
+        # C-STR02 came back 51.00 MEDIUM here while full_analysis called the same
+        # customer 89.84 HIGH. Genuinely small samples are still handled, twice:
+        # executor.py drops ml_detect under 50 rows, and ml_detect itself no-ops
+        # below IF_MIN_SAMPLES.
+        add("ml_detect", "score this entity against the whole population, so its risk score "
+            "matches what a full sweep would give it")
         add("risk_classify", "compute risk scores; executor filters the result down to this entity")
         skip("eda_profile", "single-entity investigation, not exploration")
-        skip("ml_detect", "one entity is too small a sample for anomaly detection")
 
     elif intent.intent == "ranking":
         add("load_data", "load the working dataset")
@@ -114,9 +124,15 @@ def build_plan(intent: QueryIntent) -> ExecutionPlan:
             pattern_types=intent.pattern_types)
         add("rule_detect", "check all entities against rule-based detectors; result is filtered to this entity after",
             patterns=intent.pattern_types)
+        # Same fix as entity_investigation above. The old skip reason ("explaining an
+        # existing rule-based flag, not re-scoring") contradicted the NOTE at the top
+        # of this branch: there is no cached flag to explain, so this plan *does*
+        # re-score from scratch. Omitting ml_detect meant the explanation quoted a
+        # different risk score than the flag it was explaining.
+        add("ml_detect", "the score being explained includes an ML term — recompute it "
+            "rather than explain a number we did not produce")
         add("risk_classify", "compute risk scores; executor filters the result down to this entity")
         skip("eda_profile", "explaining a flag, not exploring")
-        skip("ml_detect", "explaining an existing rule-based flag, not re-scoring")
 
     else:
         add("load_data", "unrecognised intent — falling back to full analysis on a sample")

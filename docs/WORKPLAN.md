@@ -363,9 +363,20 @@ Shared checks, run at H44:
 
 1. `pytest tests/ -v` green.
 2. **Plan-divergence test — the core agentic claim, and the most likely thing a judge probes.** Automate it:
-   - `"Is customer 4521 suspicious?"` → plan contains **neither** `eda_profile` **nor** `ml_detect`
+   - `"Is customer 4521 suspicious?"` → plan contains **no** `eda_profile`
    - `"Which customers made 10+ transactions under $10,000?"` → plan contains **no** `ml_detect`
+   - `"Show transaction distribution by country"` → plan contains **no** detection tools at all
    - `"Analyse this dataset for suspicious activity"` → plan contains **both**
+
+   > **Amended.** This originally also required that `"Is customer 4521 suspicious?"` contain no
+   > `ml_detect`, on the assumption that a single-entity query is too small a sample to rank. The
+   > implementation contradicted that assumption: the same plan runs `feature_engineer` across the
+   > whole population precisely so the score is comparable, so `ml_detect` would have received all
+   > 270 customers rather than one. Skipping it zeroed the ML term and made every single-entity
+   > query return `100 × 0.6 × max_rule_weight` — C-STR02 came back **51.00 MEDIUM** when a full
+   > sweep called the same customer **89.84 HIGH**. The genuine sample-size guard is §5's rule
+   > (*"filtered subset < 50 rows → drop `ml_detect`"*), which lives in `executor.py` and is
+   > unaffected. Plan divergence is still demonstrated by the four cases above.
 3. All 10 demo queries return a valid `AgentResponse` with a non-empty explanation **and** an escalation on
    every flag.
 4. **LLM-off run works** (key unset) — rehearsed, not just assumed.

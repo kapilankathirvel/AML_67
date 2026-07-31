@@ -177,10 +177,10 @@ One branch per intent, implementing the Contract 4 mapping exactly:
 | `full_analysis` | load → eda → features → rules → ml → risk | — |
 | `pattern_search` | load → filter → features *(scoped)* → rules *(scoped)* → ml → risk | `eda_profile` |
 | `threshold_query` | load → filter → aggregate | `feature_engineer`, `ml_detect`, `eda_profile` |
-| `entity_investigation` | load → filter → entity_lookup → features → rules → risk | `eda_profile`, `ml_detect` |
+| `entity_investigation` | load → filter → entity_lookup → features → rules → ml → risk | `eda_profile` |
 | `ranking` | load → filter → features → rules → ml → risk *(sliced to `top_n`)* | `eda_profile` |
 | `eda` | load → filter → eda | `feature_engineer`, `rule_detect`, `ml_detect`, `risk_classify` |
-| `explain_flag` | load → entity_lookup → features → rules → risk *(scoped to entity)* | `eda_profile`, `ml_detect` |
+| `explain_flag` | load → entity_lookup → features → rules → ml → risk *(scoped to entity)* | `eda_profile` |
 
 Every `ToolCall` carries a `reason`. Every tool *not* included gets an entry in
 `tools_considered_but_skipped` with its own reason. That second list is what converts "the agent decided"
@@ -190,8 +190,19 @@ genuinely different plans.
 
 Two notable choices:
 
-- **`ml_detect` is skipped for `entity_investigation`** because a single entity is not a sample you can
-  fit an anomaly model on. Skipping it is the statistically correct decision, and the UI says so.
+- **`ml_detect` runs even for single-entity intents**, which reads as a mistake until you look at what the
+  rest of the plan does. `feature_engineer` in those plans computes across the *whole population* — the
+  step's own reason says "required for a comparable risk score" — so `ml_detect` receives all 270
+  customers, not the one being asked about. The planner used to skip it on the reasoning that "a single
+  entity is not a sample you can fit an anomaly model on"; that reasoning described a plan the planner
+  wasn't building. The effect was to zero the ML half of the fusion formula, so every single-entity query
+  returned exactly `100 × 0.6 × max_rule_weight`. C-STR02 came back **51.00 MEDIUM ("review")** when asked
+  about directly and **89.84 HIGH ("report")** in a full sweep — the direct question was the one query
+  that understated a customer's risk, and it pushed them below the SAR-drafting threshold.
+
+  The sample-size concern was real, but it belongs on the size of the data rather than the name of the
+  intent, and it was already implemented twice: the executor drops `ml_detect` when `filter_data` leaves
+  under 50 rows, and `ml_detect` itself returns empty scores below `IF_MIN_SAMPLES`. Both still fire.
 - **`explain_flag` re-runs `load_data`** rather than reusing a cached run. Contract 4 originally specified
   cache reuse, but that mechanism was never wired to anything, so the intent always returned empty.
   Scoring fresh is simpler and always correct — the documented trade-off is that it can't explain a flag
@@ -244,12 +255,12 @@ Nine tools, each a single function decorated with `@tool` and living in its own 
 
 | Tool | Responsibility |
 |---|---|
-| `load_data` | Load a dataset and convert it to the canonical schema; emits transactions + customers |
+| `load_data` | Load a dataset and convert it to the canonical schema; emits transactions + customers, plus the unfiltered reference frame ML percentiles are ranked against |
 | `filter_data` | Composable filters (date, country, txn type, amount, min txn count, segment); never mutates in place |
 | `eda_profile` | Profile stats + 5 Plotly figures (amount histogram, threshold proximity, txn type, country, volume timeseries) |
 | `feature_engineer` | 17 per-customer AML features, scoped to requested patterns |
 | `rule_detect` | Rules R1–R7; emits per-rule evidence dicts |
-| `ml_detect` | IsolationForest + LocalOutlierFactor anomaly scoring |
+| `ml_detect` | IsolationForest + LocalOutlierFactor anomaly scoring, ranked against the fixed full population |
 | `aggregate_query` | Deterministic group-by/aggregate with threshold and top-N |
 | `entity_lookup` | One customer's profile + recent transaction table |
 | `risk_classify` | Fuses rule hits and ML scores into a 0–100 risk score, level, and escalation |
@@ -535,6 +546,27 @@ ml_scores = []                                                          (n < 10,
 
 Percentile-ranking before fusing is what makes the weights meaningful — raw `decision_function` output
 and `negative_outlier_factor_` are not on a common scale and averaging them directly would be arbitrary.
+
+**What the percentile is ranked against.** A percentile is only meaningful relative to a population, and
+the choice of population turns out to matter more than the choice of model. Both models are fitted and
+ranked on `artifacts["features_reference"]` — the **full customer set, before any filtering** — and each
+entity's percentile is then looked up for whatever subset the query asked about.
+
+The alternative, ranking inside the query's own filtered cohort, is what the system originally did, and it
+made a customer's risk score a function of the analyst's typing rather than of the customer's behaviour.
+Measured on the sample dataset: adding `amount_min=5000` to a structuring search moved percentiles by up
+to **0.73** and pushed **four customers across a risk band**. A threshold that decides whether a SAR gets
+drafted cannot move because someone narrowed their search.
+
+The trade-off is accepted deliberately and is not free — the ML term is now insensitive to the query
+window, so a customer who is unremarkable across the full dataset but anomalous within a narrow one no
+longer registers on the ML half. Rules still evaluate the filtered frame and still fire on them. Stability
+was judged the more important property for a score attached to an escalation decision.
+
+Scoping is applied to the **output**, not the ranking: `ml_scores` is emitted for every customer appearing
+in the working frame as sender *or* receiver. The receiver half matters — `feature_engineer` indexes on
+senders, so scoping ML output to the feature index silently dropped receiver-side R7 hits and defaulted
+them to a percentile of 0.0, reintroducing exactly the filter-dependence being removed.
 
 **Explainability without SHAP.** For each entity, the top 3 contributing features are reported, ranked by
 deviation from the peer median:

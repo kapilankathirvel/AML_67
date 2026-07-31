@@ -181,15 +181,29 @@ them. Found via a full-suite test failure that only reproduced in specific file-
 | `full_analysis` | load → eda → features → rules → ml → risk | — |
 | `pattern_search` | load → filter → features(scoped) → rules(scoped) → ml → risk | eda |
 | `threshold_query` | load → filter → aggregate | features, ml, eda |
-| `entity_investigation` | load → filter → entity_lookup → features → rules → risk *(→ scoped to entity)* | eda, ml |
+| `entity_investigation` | load → filter → entity_lookup → features → rules → ml → risk *(→ scoped to entity)* | eda |
 | `ranking` | load → filter → features → rules → ml → risk *(→ sliced to top_n)* | eda |
 | `eda` | load → filter → eda | features, rules, ml, risk |
-| `explain_flag` | load → entity_lookup → features → rules → risk *(→ scoped to entity)* | eda, ml |
+| `explain_flag` | load → entity_lookup → features → rules → ml → risk *(→ scoped to entity)* | eda |
 
 `explain_flag`'s inclusion of `load_data` is a deliberate deviation from Contract 4's original text
 ("reuse a cached run") — that mechanism was never actually wired to anything, so the intent always
 returned empty. Scoring the entity fresh (same shape as `entity_investigation`, minus `filter_data`, since
 "why was X flagged" implies no extra scoping) makes the feature actually answer the question.
+
+Both single-entity intents run `ml_detect` despite asking about one customer, which looks wrong until you
+read the rest of their plan: `feature_engineer` runs across the **whole population** so the resulting score
+is comparable, and `ml_detect` therefore receives all 270 customers rather than one. They originally
+skipped it — `WORKPLAN.md` §8 even pinned that as a definition-of-done item — and the effect was to zero
+the ML half of Contract 5's formula. Every single-entity query returned exactly `100 × 0.6 ×
+max_rule_weight`: C-STR02 scored **51.00 MEDIUM ("review")** when asked about directly and **89.84 HIGH
+("report")** in a full sweep. Asking about a customer directly was the one query that understated their
+risk, and it downgraded them out of the SAR-drafting tier.
+
+Genuinely small samples are still handled, by the two guards that fire on data size rather than intent
+name: the executor drops `ml_detect` when `filter_data` leaves under 50 rows, and `ml_detect` itself
+no-ops below `IF_MIN_SAMPLES`. Plan divergence — the core agentic claim — is unaffected: `eda_profile`
+stays out of both, `threshold_query` still skips ML entirely, and `eda` still runs no detection at all.
 
 ---
 
@@ -245,9 +259,12 @@ sequenceDiagram
 **"Is customer 4521 suspicious?"** — bare number, entity_investigation
 ```
 parse → entities=["C-04521"] (constructed guess, not yet a real ID)
-plan  → load_data, filter_data, entity_lookup, feature_engineer, rule_detect, risk_classify
+plan  → load_data, filter_data, entity_lookup, feature_engineer, rule_detect, ml_detect,
+        risk_classify        (eda_profile skipped — this is not exploration)
 exec  → load_data runs → _resolve_entities() matches "04521" by numeric id against real
         customer_ids → resolves to e.g. "C-N0002" if a match exists, else leaves unresolved
+      → features/rules/ml all run across the full population, so the score this entity gets
+        is the same one a full sweep would give it
       → risk_classify scores everyone → executor filters risk_rows to just this one entity
 narrate → 0 or 1 Flag, never a crash either way
 ```

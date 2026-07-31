@@ -80,9 +80,17 @@ genuinely different tool sequence per query intent — verified by an automated 
 
 | Query | Tools invoked | Tools explicitly skipped (and why) |
 |---|---|---|
-| *"Is customer 4521 suspicious?"* | `load_data → filter_data → entity_lookup → feature_engineer → rule_detect → risk_classify` | `eda_profile` (not exploring), `ml_detect` (one entity is too small a sample) |
+| *"Is customer 4521 suspicious?"* | `load_data → filter_data → entity_lookup → feature_engineer → rule_detect → ml_detect → risk_classify` | `eda_profile` (not exploring) |
+| *"Show transaction distribution by country"* | `load_data → filter_data → eda_profile` | `feature_engineer`, `rule_detect`, `ml_detect`, `risk_classify` (no detection requested) |
 | *"Which customers made 10+ transactions under $10,000?"* | `load_data → filter_data → aggregate_query` | `feature_engineer`, `ml_detect`, `eda_profile` (a deterministic count answers this exactly) |
 | *"Analyse this dataset for suspicious activity"* | `load_data → eda_profile → feature_engineer → rule_detect → ml_detect → risk_classify` | — (full sweep) |
+
+> `ml_detect` used to be skipped for the single-entity query too, on the reasoning that one customer is
+> too small a sample to rank. That reasoning didn't match the plan it was in: `feature_engineer` there
+> runs across the *whole* population, so `ml_detect` receives all 270 customers. Skipping it zeroed the
+> ML half of the risk formula, and C-STR02 came back **51.00 MEDIUM** when asked about directly versus
+> **89.84 HIGH** in a full sweep. The sample-size guard belongs on data size, not intent name — and it
+> already exists twice at runtime (see the re-planning rules below).
 
 The executor also **re-plans mid-run**, not just at planning time:
 - `rule_detect` returns 0 hits → appends `ml_detect` to widen the net
@@ -360,6 +368,15 @@ generator doesn't inject cohorts for those two patterns, so they're implemented 
   There's no name-based lookup.
 - **`explain_flag` re-scores the entity fresh** rather than reusing a cached prior run — simpler and
   always correct, but means it can't explain a flag from a run using different filters than "all data."
+- **The ML term is deliberately blind to the query window.** Anomaly percentiles are ranked against the
+  full customer population, fixed, rather than against whichever customers survived the analyst's
+  filters. That is what makes a risk band mean the same thing in every query — a threshold that decides
+  SAR escalation cannot move because someone added `amount_min` to a search. The cost is real: a customer
+  who looks unremarkable across the whole dataset but spikes inside a narrow window no longer stands out
+  on the ML half of the score. The rules still run on the filtered frame and still catch them. Before
+  this was fixed, an `amount_min=5000` filter shifted percentiles by up to 0.73 and moved four customers
+  across a risk band; the same filters now produce zero drift, pinned by
+  `tests/test_ml.py::TestPercentileReferencePopulation`.
 - **Detection is overwhelmingly sender-side, and the remaining receiver-side gap is structural.** R7 is
   the one receiver-keyed rule; every other rule and all 17 features evaluate outbound behaviour. Of the 63
   customers who appear only as receivers of labelled transactions, R7 recovers 12 and 51 remain

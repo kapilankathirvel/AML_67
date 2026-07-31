@@ -70,9 +70,15 @@ def test_entity_investigation_returns_scoped_flag():
         confidence=0.9,
     )
     plan = build_plan(intent)
+    # run_plan mutates plan.steps, so the planner's own output has to be captured
+    # first. ml_detect is planned here now (see WORKPLAN.md §8's amendment) but this
+    # test runs on the 5-row mock dataset, where the executor's <50-row guard then
+    # legitimately drops it again — which is the guard doing its job.
+    planned = [s.tool for s in plan.steps]
+    assert "ml_detect" in planned
+    assert "eda_profile" not in planned
+
     response = run_plan(intent, plan)
 
-    tool_names = [s.tool for s in plan.steps]
-    assert "eda_profile" not in tool_names
-    assert "ml_detect" not in tool_names
+    assert "eda_profile" not in [s.tool for s in plan.steps]
     assert response.flags

@@ -73,6 +73,76 @@ def test_pattern_search_scopes_features_and_rules(real_tools):
     assert response.flags
 
 
+def test_entity_investigation_agrees_with_the_full_sweep(real_tools):
+    """Asking about one customer must not change that customer's risk score.
+
+    entity_investigation used to skip ml_detect on the reasoning that one entity is
+    too small a sample — but the same plan runs feature_engineer across the whole
+    population, so ml_detect would have received all 270 customers. Skipping it
+    zeroed the ML half of Contract 5's formula, and every single-entity query came
+    back at 100 * 0.6 * max_rule_weight: C-STR02 scored 51.00 MEDIUM ('review') here
+    while full_analysis called the same customer 89.84 HIGH ('report'). The direct
+    question about a customer was the one query that understated their risk, and it
+    downgraded them out of the SAR-drafting tier.
+    """
+    full_intent = QueryIntent(raw_query="Analyse this dataset for suspicious activity",
+                              intent="full_analysis", parsed_by="rules", confidence=0.9)
+    full_plan = build_plan(full_intent)
+    full_response = run_plan(full_intent, full_plan)
+    by_entity = {f.entity_id: f for f in full_response.flags}
+    assert REAL_STRUCTURING_ENTITY in by_entity, "fixture entity should be flagged by a full sweep"
+    expected = by_entity[REAL_STRUCTURING_ENTITY]
+
+    solo_intent = QueryIntent(raw_query=f"Is customer {REAL_STRUCTURING_ENTITY} suspicious?",
+                              intent="entity_investigation", entities=[REAL_STRUCTURING_ENTITY],
+                              parsed_by="rules", confidence=0.9)
+    solo_plan = build_plan(solo_intent)
+    solo_response = run_plan(solo_intent, solo_plan)
+
+    assert "ml_detect" in [s.tool for s in solo_plan.steps]
+    assert len(solo_response.flags) == 1
+    actual = solo_response.flags[0]
+
+    assert actual.risk_score == expected.risk_score, (
+        f"{REAL_STRUCTURING_ENTITY} scored {actual.risk_score} when asked about directly "
+        f"but {expected.risk_score} in a full sweep — the score must not depend on the query"
+    )
+    assert actual.risk_level == expected.risk_level
+    assert actual.escalation == expected.escalation
+
+
+def test_small_sample_still_drops_ml_detect(real_tools):
+    """The sample-size guard removed from the planner was redundant, not load-bearing.
+
+    executor.py drops ml_detect at runtime when filter_data leaves under 50 rows, and
+    that is the guard WORKPLAN.md §5 actually specifies — it fires on the size of the
+    data rather than on the name of the intent.
+    """
+    # $20,000 leaves 31 of aml_sample.csv's 2,002 transactions — under the 50-row
+    # floor. A structuring-band filter would not do: amount_min=9900 still leaves 680
+    # rows, because the $9,000-9,999 band is exactly where the planted structuring is.
+    intent = QueryIntent(raw_query="Find structuring in transactions over $20,000",
+                          intent="pattern_search", pattern_types=["structuring"],
+                          filters=Filters(amount_min=20000.0),
+                          parsed_by="rules", confidence=0.9)
+    plan = build_plan(intent)
+    # load_data defaults to synthetic_alt, a much larger dataset where $20,000 leaves
+    # far more than 50 rows. Pin the source or this test silently stops testing the
+    # guard it is named after.
+    for step in plan.steps:
+        if step.tool == "load_data":
+            step.params = {**step.params, "source": "synthetic"}
+    assert "ml_detect" in [s.tool for s in plan.steps], "planner should have planned ml_detect"
+    response = run_plan(intent, plan)
+
+    assert all(s.status == "ok" for s in plan.steps), [(s.tool, s.status) for s in plan.steps]
+    assert "ml_detect" not in [s.tool for s in plan.steps], (
+        "executor should have dropped ml_detect once the filtered frame fell below 50 rows"
+    )
+    assert any("too small" in d for d in plan.decisions)
+    assert response.summary
+
+
 def test_threshold_query_against_real_tools(real_tools):
     intent = QueryIntent(raw_query="Which customers made 10+ transactions under $10,000?",
                           intent="threshold_query",
@@ -190,7 +260,9 @@ def test_explain_flag_actually_scores_the_entity(real_tools):
     assert all(s.status == "ok" for s in plan.steps)
     assert "load_data" in [s.tool for s in plan.steps]
     assert "eda_profile" not in [s.tool for s in plan.steps]
-    assert "ml_detect" not in [s.tool for s in plan.steps]
+    # ml_detect now runs here — see WORKPLAN.md §8's amendment. Without it the
+    # explanation quoted a score the ML term had been zeroed out of.
+    assert "ml_detect" in [s.tool for s in plan.steps]
     assert len(response.flags) == 1
     assert response.flags[0].entity_id == REAL_STRUCTURING_ENTITY
     assert response.flags[0].explanation in response.summary

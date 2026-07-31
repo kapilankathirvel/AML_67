@@ -661,15 +661,47 @@ def feature_engineer(
             f"for pattern_types=[{patterns_label}]"
         )
 
+        # ------------------------------------------------------------------
+        # Reference features — the population ml_detect ranks percentiles against
+        # ------------------------------------------------------------------
+        # feature_engineer runs *after* filter_data, so feat_df above describes only
+        # the customers who survived the analyst's filters. Ranking anomaly
+        # percentiles inside that cohort made a customer's risk score depend on the
+        # query: adding amount_min=5000 moved percentiles by up to 0.73 and pushed
+        # four customers across a risk band. So we also compute the same features
+        # over the unfiltered frame and hand that to ml_detect as the fixed peer
+        # group.
+        #
+        # This re-invokes the tool rather than extracting the ~120-line computation
+        # above, which guarantees both frames go through byte-identical logic. The
+        # recursive call gets no "transactions_reference" artifact, so it computes
+        # features once and stops — there is no second level of recursion.
+        reference_df = ctx.artifacts.get("transactions_reference")
+        ref_feat_df = feat_df
+        if reference_df is not None and len(reference_df) > len(df):
+            ref_result = feature_engineer(
+                ToolContext(df=reference_df, customers=ctx.customers, intent=ctx.intent,
+                            artifacts={"customers": ctx.artifacts.get("customers")}),
+                pattern_types=pattern_types,
+            )
+            if ref_result.ok:
+                ref_feat_df = ref_result.artifacts["features"]
+                note += (
+                    f"; anomaly peer group = {len(ref_feat_df):,} customers "
+                    "(unfiltered population)"
+                )
+
         return ToolResult(
             ok=True,
             artifacts={
                 "features": feat_df,
                 "feature_list": feature_list,
+                "features_reference": ref_feat_df,
             },
             metrics={
                 "customer_count": len(feat_df),
                 "feature_count": len(feature_list),
+                "reference_customer_count": len(ref_feat_df),
                 "pattern_types": pattern_types or ["all"],
             },
             notes=[note],

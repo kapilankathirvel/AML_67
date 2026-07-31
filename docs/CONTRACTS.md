@@ -238,8 +238,10 @@ Rules for tool authors:
 ### Agreed `artifacts` keys (the tool-to-tool handshake)
 | Key | Written by | Shape |
 |---|---|---|
+| `transactions_reference` | `load_data` | DataFrame — the transactions as loaded, before `filter_data` narrows `ctx.df`. Read-only for everyone downstream. |
 | `features` | `feature_engineer` | DataFrame indexed by `customer_id` |
 | `feature_list` | `feature_engineer` | `list[str]` — which features were actually computed |
+| `features_reference` | `feature_engineer` | DataFrame, same columns as `features`, computed over `transactions_reference`. The fixed peer group `ml_detect` ranks percentiles against; the same object as `features` when no filter ran. |
 | `rule_hits` | `rule_detect` | `list[{entity_id, rule_id, evidence: dict, weight: float}]` |
 | `ml_scores` | `ml_detect` | `list[{entity_id, score: float, percentile: float, top_features: list[str]}]` |
 | `risk_rows` | `risk_classify` | `list[{entity_id, risk_score, risk_level, escalation, patterns, triggered_rules, evidence}]` |

@@ -37,12 +37,18 @@ def test_health():
     assert body["mocks"] is True
 
 
-def test_query_entity_investigation_excludes_ml_and_eda():
+def test_query_entity_investigation_excludes_eda():
+    """The API returns the plan *after* execution, and these tests run against the
+    5-row mock dataset, so the executor's <50-row guard strips ml_detect before the
+    response is built. That makes this endpoint the wrong place to pin whether the
+    planner includes ml_detect — tests/test_planner.py does that on the plan itself.
+    What this test still pins is that eda_profile never enters a single-entity plan.
+    """
     r = client.post("/query", json={"query": "Is customer 4521 suspicious?"})
     assert r.status_code == 200
     tools = [s["tool"] for s in r.json()["plan"]["steps"]]
     assert "eda_profile" not in tools
-    assert "ml_detect" not in tools
+    assert "risk_classify" in tools
 
 
 def test_query_threshold_excludes_ml():

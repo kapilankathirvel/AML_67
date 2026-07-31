@@ -16,12 +16,19 @@ def _tool_names(plan) -> list[str]:
     return [s.tool for s in plan.steps]
 
 
-def test_entity_investigation_excludes_eda_and_ml():
-    """WORKPLAN.md Section 8 plan-divergence test: 'Is customer 4521 suspicious?'"""
+def test_entity_investigation_excludes_eda_but_still_scores_ml():
+    """WORKPLAN.md Section 8 plan-divergence test: 'Is customer 4521 suspicious?'
+
+    §8 originally also required ml_detect to be absent here. That was amended (see
+    the note in WORKPLAN.md §8): this plan runs feature_engineer across the whole
+    population, so ml_detect gets 270 customers rather than one, and skipping it
+    zeroed the ML term — the same customer scored 51.00 MEDIUM here and 89.84 HIGH
+    under full_analysis. Divergence is still real: eda_profile stays out.
+    """
     plan = build_plan(_intent("entity_investigation", entities=["C-04521"]))
     names = _tool_names(plan)
     assert "eda_profile" not in names
-    assert "ml_detect" not in names
+    assert "ml_detect" in names
 
 
 def test_threshold_query_excludes_ml():
@@ -53,17 +60,22 @@ def test_eda_intent_skips_all_detection():
         assert tool not in names
 
 
-def test_explain_flag_scores_the_entity_but_skips_eda_and_ml():
+def test_explain_flag_scores_the_entity_but_skips_eda():
     """explain_flag has no cached-run mechanism to reuse (see planner.py comment),
     so it loads data fresh and scores just this entity — same shape as
-    entity_investigation, minus filter_data (no extra scoping implied)."""
+    entity_investigation, minus filter_data (no extra scoping implied).
+
+    ml_detect belongs in this plan for the same reason it belongs in
+    entity_investigation: since the score is recomputed from scratch, omitting the
+    ML term meant the explanation quoted a different number than the flag it was
+    explaining."""
     plan = build_plan(_intent("explain_flag", entities=["T-000123"]))
     names = _tool_names(plan)
     assert "load_data" in names
     assert "entity_lookup" in names
     assert "risk_classify" in names
+    assert "ml_detect" in names
     assert "eda_profile" not in names
-    assert "ml_detect" not in names
 
 
 def test_every_intent_produces_a_reason_on_every_step():

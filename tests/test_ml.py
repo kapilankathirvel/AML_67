@@ -178,6 +178,100 @@ class TestMlDetect:
         assert len(ctx.df) == original_len
 
 
+class TestPercentileReferencePopulation:
+    """An anomaly percentile must describe the customer, not the query.
+
+    Percentiles used to be ranked inside whatever cohort survived filter_data, so
+    narrowing a query silently re-scored everyone still in it. Measured on the real
+    sample: an amount_min=5000 filter moved percentiles by up to 0.73 and pushed four
+    customers across a risk band. ml_detect now fits and ranks on
+    artifacts["features_reference"] — the unfiltered population — so these are
+    invariant.
+    """
+
+    @staticmethod
+    def _scores(sample_df: pd.DataFrame, sample_cust: pd.DataFrame,
+                amount_min: float | None) -> dict[str, float]:
+        ctx = ToolContext(df=sample_df.copy())
+        ctx.artifacts["customers"] = sample_cust
+        # load_data captures this in the real pipeline; set it directly so the test
+        # exercises ml_detect rather than the loader.
+        ctx.artifacts["transactions_reference"] = sample_df.copy()
+
+        if amount_min is not None:
+            ctx.df = ctx.df[ctx.df["amount"] >= amount_min].copy()
+
+        feat_r = feature_engineer(ctx)
+        assert feat_r.ok, feat_r.error
+        ctx.artifacts.update(feat_r.artifacts)
+
+        ml_r = ml_detect(ctx)
+        assert ml_r.ok, ml_r.error
+        return {s["entity_id"]: s["percentile"] for s in ml_r.artifacts["ml_scores"]}
+
+    @pytest.fixture(scope="class")
+    def unfiltered_scores(self, sample_df, sample_cust) -> dict[str, float]:
+        """Computed once — feature_engineer over the full sample is the slow part of
+        this class, and every parametrised case compares against the same baseline."""
+        return self._scores(sample_df, sample_cust, None)
+
+    @pytest.mark.parametrize("amount_min", [2000.0, 5000.0, 8000.0])
+    def test_percentiles_are_invariant_under_filtering(
+        self, sample_df: pd.DataFrame, sample_cust: pd.DataFrame,
+        unfiltered_scores: dict[str, float], amount_min: float,
+    ) -> None:
+        unfiltered = unfiltered_scores
+        filtered   = self._scores(sample_df, sample_cust, amount_min)
+
+        shared = set(unfiltered) & set(filtered)
+        assert shared, "filter removed every entity — test proves nothing"
+
+        drifted = {
+            eid: (unfiltered[eid], filtered[eid])
+            for eid in shared
+            if abs(unfiltered[eid] - filtered[eid]) > 1e-9
+        }
+        assert not drifted, (
+            f"amount_min={amount_min} changed {len(drifted)} percentiles; "
+            f"a customer's anomaly rank must not depend on the query. {list(drifted.items())[:5]}"
+        )
+
+    def test_reference_is_the_full_population_not_the_cohort(
+        self, sample_df: pd.DataFrame, sample_cust: pd.DataFrame
+    ) -> None:
+        """The peer group stays at full size even when the working frame shrinks."""
+        ctx = ToolContext(df=sample_df.copy())
+        ctx.artifacts["customers"] = sample_cust
+        ctx.artifacts["transactions_reference"] = sample_df.copy()
+        ctx.df = ctx.df[ctx.df["amount"] >= 5000.0].copy()
+
+        feat_r = feature_engineer(ctx)
+        ctx.artifacts.update(feat_r.artifacts)
+        ml_r = ml_detect(ctx)
+
+        cohort = len(feat_r.artifacts["features"])
+        reference = ml_r.metrics["ml_reference_population"]
+        assert reference > cohort, (
+            f"reference population ({reference}) should exceed the filtered cohort ({cohort})"
+        )
+        assert reference == len(feat_r.artifacts["features_reference"])
+
+    def test_falls_back_to_cohort_when_no_reference_present(
+        self, sample_df: pd.DataFrame, sample_cust: pd.DataFrame
+    ) -> None:
+        """Without a reference artifact, behaviour is the pre-existing cohort ranking —
+        tools stay usable standalone, which several tests in this file rely on."""
+        ctx = ToolContext(df=sample_df.copy())
+        ctx.artifacts["customers"] = sample_cust
+        feat_r = feature_engineer(ctx)
+        ctx.artifacts.update(feat_r.artifacts)
+        assert "transactions_reference" not in ctx.artifacts
+
+        ml_r = ml_detect(ctx)
+        assert ml_r.ok
+        assert ml_r.metrics["ml_reference_population"] == len(feat_r.artifacts["features"])
+
+
 # ---------------------------------------------------------------------------
 # risk_classify tests
 # ---------------------------------------------------------------------------

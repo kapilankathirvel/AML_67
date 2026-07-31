@@ -420,7 +420,29 @@ Rationale: structuring, smurfing, and rapid cashout are sender behaviours. Inbou
 are tracked separately only for `rapid_cashout_ratio` (where the trigger is an inbound event).
 Computing sender-only reduces false positives from high-volume recipients (e.g. merchant accounts).
 
-### 5.5 pass_through_ratio computation
+### 5.5 ML percentiles are ranked against a fixed population
+The ML half of Contract 5's score is a **percentile**, which is meaningless without saying
+percentile *of what*. The population is the **full customer set, unfiltered** — never the
+subset the analyst's query happened to select.
+
+This is a correction, not an original design choice. Ranking inside the query's own cohort
+made a customer's score depend on the query rather than on their behaviour: adding
+`amount_min=5000` to a structuring search moved percentiles by up to **0.73** and pushed
+**four customers across a risk band**. A number that decides whether a SAR is drafted cannot
+change because an analyst narrowed their search.
+
+The accepted cost: the ML term is now blind to the query window. A customer who is
+unremarkable across the whole dataset but anomalous within a 30-day slice no longer registers
+on the ML half. Rules R1–R7 still evaluate the filtered frame and still fire on them. For a
+score attached to an escalation decision, stability was judged the more important property.
+
+One subtlety worth recording, because it reintroduced the bug once already: ML output is
+scoped to every customer appearing in the working frame as **sender or receiver**. Features
+are indexed on senders only (§5.4), so scoping ML output to the feature index dropped
+receiver-side R7 hits — C-N0138 sends nothing above $5,000, so under an `amount_min=5000`
+filter it lost its ML score to the 0.0 default and fell from 52.58 to 45.00.
+
+### 5.6 pass_through_ratio computation
 Window: sliding 48-hour windows, step = 1 hour.  
 Formula: `min(received_48h, sent_48h) / max(received_48h, sent_48h)`  
 If both are zero: ratio = 0.0. The **maximum** ratio across all 48h windows is the feature value.  
