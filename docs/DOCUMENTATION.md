@@ -91,42 +91,50 @@ data survived.
 
 ### 2.2 Layer map
 
-```
-                       POST /query  {"query": "..."}
-                                │
-                                ▼
-                    ┌───────────────────────────┐
-                    │      backend/main.py       │   FastAPI
-                    │  /query  /health           │
-                    │  /dataset/summary  /plan   │
-                    └─────────────┬─────────────┘
-                                  │
-   ┌──────────────────────────────┼──────────────────────────────┐
-   ▼                              ▼                              ▼
-┌────────────────┐      ┌──────────────────┐      ┌────────────────────┐
-│ intent_parser  │─────▶│     planner      │─────▶│      executor       │
-│                │      │                  │      │                     │
-│ str →          │      │ QueryIntent →    │      │ runs plan.steps,    │
-│ QueryIntent    │      │ ExecutionPlan    │      │ threads ToolContext,│
-│ LLM + regex    │      │ (Contract 4)     │      │ re-plans mid-run    │
-└────────────────┘      └──────────────────┘      └──────────┬─────────┘
-        │                                                     │
-        ▼                                       ┌─────────────┴─────────────┐
-┌────────────────┐                              ▼                           ▼
-│ llm/client.py  │                   ┌────────────────────┐     ┌──────────────────┐
-│ provider-      │                   │  agent/registry.py │     │    narrator.py    │
-│ agnostic       │                   │  auto-discovers    │     │  risk_rows →      │
-│ adapter        │                   │  backend/tools/*   │     │  Flag[] + SAR     │
-└────────────────┘                   └─────────┬──────────┘     └──────────────────┘
-                                               │
-        ┌──────────────────┬─────────────────┬─┴───────────────┬──────────────────┐
-        ▼                  ▼                 ▼                 ▼                  ▼
-   load_data          filter_data       eda_profile     feature_engineer     rule_detect
-   entity_lookup    aggregate_query      ml_detect       risk_classify
-                              (backend/tools/*.py)
-                                               │
-                                               ▼
-                              AgentResponse (JSON) → HTTP → Streamlit UI
+```mermaid
+flowchart TD
+    Q(["POST /query — natural-language query"])
+
+    subgraph HTTP ["HTTP surface"]
+        API["FastAPI · backend/main.py<br/>POST /query · GET /health<br/>GET /dataset/summary · GET /plan/:id"]
+    end
+
+    subgraph CORE ["Agent core · backend/agent/"]
+        IP["intent_parser<br/>str to QueryIntent"]
+        PL["planner<br/>QueryIntent to ExecutionPlan · Contract 4"]
+        EX["executor<br/>runs plan.steps · threads ToolContext<br/>re-plans mid-run"]
+        NA["narrator<br/>risk rows to flags and SAR drafts"]
+    end
+
+    LLM["llm/client.py<br/>provider-agnostic adapter"]
+    FB["regex fallback<br/>covers all 7 intents alone"]
+    REG["agent/registry.py<br/>auto-discovers backend/tools/*"]
+
+    subgraph TOOLS ["Tool layer · backend/tools/"]
+        direction LR
+        LD["load_data"]
+        FD["filter_data"]
+        EDA["eda_profile"]
+        FE["feature_engineer"]
+        RD["rule_detect"]
+        MD["ml_detect"]
+        AQ["aggregate_query"]
+        EL["entity_lookup"]
+        RC["risk_classify"]
+    end
+
+    RESP["AgentResponse JSON"]
+    UI["Streamlit UI"]
+
+    Q --> API --> IP
+    IP -.->|primary| LLM
+    IP -.->|always available| FB
+    IP --> PL --> EX
+    EX <-->|resolve by name| REG
+    REG --> TOOLS
+    EX --> NA --> RESP
+    RESP --> API
+    API -->|HTTP| UI
 ```
 
 ### 2.3 The agent core
@@ -293,35 +301,50 @@ AgentResponse  query, intent, plan, flags[], tables{}, charts{}, metrics{}, summ
 
 End-to-end trace of `"Find structuring patterns in the last 30 days"`:
 
-```
-1. POST /query {"query": "Find structuring patterns in the last 30 days"}
+```mermaid
+sequenceDiagram
+    autonumber
+    actor A as Analyst
+    participant API as FastAPI
+    participant IP as intent_parser
+    participant PL as planner
+    participant EX as executor
+    participant T as Tool layer
+    participant NA as narrator
 
-2. parse_intent()
-     LLM (JSON mode) → intent="pattern_search", pattern_types=["structuring"],
-                       filters.date_from/date_to resolved against the dataset's max date
-     (on LLM failure/timeout → regex fallback produces the same shape, parsed_by="rules")
+    A->>API: POST /query - find structuring in the last 30 days
+    API->>IP: parse_intent(query)
+    Note over IP: LLM in JSON mode · on failure or timeout<br/>the regex fallback returns the same shape
+    IP-->>API: QueryIntent - pattern_search, structuring, date window
+    API->>PL: build_plan(intent)
+    PL-->>API: ExecutionPlan - 6 steps<br/>eda_profile skipped, reason recorded
+    API->>EX: run_plan(intent, plan)
 
-3. build_plan()
-     steps = [load_data, filter_data, feature_engineer(pattern_types=["structuring"]),
-              rule_detect(rules=["R1"]), ml_detect, risk_classify]
-     tools_considered_but_skipped = ["eda_profile — query targets a specific pattern,
-                                      not broad exploration"]
+    EX->>T: load_data
+    T-->>EX: 1710 transactions · 294 customers into ctx
+    Note over EX: _resolve_entities — no entities in this query
+    EX->>T: filter_data - date window
+    T-->>EX: narrowed ctx.df
+    EX->>T: feature_engineer - structuring only
+    T-->>EX: 9 of 17 features computed
+    EX->>T: rule_detect - R1
+    T-->>EX: rule_hits with per-hit evidence
 
-4. run_plan()
-     load_data        → 1,710 txns / 294 customers into ctx.df, ctx.customers
-     _resolve_entities()  (no entities in this query — no-op)
-     filter_data      → date window applied → ctx.df narrowed
-     feature_engineer → only structuring's 9 features computed, not all 17
-     rule_detect      → R1 evaluated → rule_hits[] with per-hit evidence
-     ml_detect        → IF + LOF over the feature matrix → ml_scores[]
-     risk_classify    → fuse → risk_rows[] sorted by risk_score desc
-     (each step timed; status recorded; any failure isolated to that step)
+    alt zero rule hits
+        EX->>EX: append ml_detect to widen the net
+    else filtered set under 50 rows
+        EX->>EX: drop the queued ml_detect
+    end
 
-5. build_flags()
-     risk_rows → Flag[] with Evidence[], explanation, and sar_draft for HIGH rows
-     top 5 HIGH explanations optionally LLM-polished
-
-6. AgentResponse → JSON → Streamlit renders plan trace, flags, charts, tables
+    EX->>T: ml_detect
+    T-->>EX: ml_scores - percentile ranked
+    EX->>T: risk_classify
+    T-->>EX: risk_rows sorted by score
+    Note over EX: each step timed · status recorded<br/>any failure isolated to that step
+    EX->>NA: build_flags(risk_rows)
+    NA-->>EX: flags with evidence and explanation<br/>SAR draft for HIGH · top 5 optionally polished
+    EX-->>API: AgentResponse
+    API-->>A: JSON - plan trace, flags, charts, tables
 ```
 
 ### 2.7 API surface
@@ -342,29 +365,22 @@ End-to-end trace of `"Find structuring patterns in the last 30 days"`:
 Detection is **hybrid**: deterministic rules provide precision and explainability, unsupervised ML
 provides recall against novel patterns, and a weighted fusion produces one auditable score.
 
-```
-   canonical transactions
-            │
-            ▼
-  ┌───────────────────────┐
-  │  feature_engineer     │   17 per-customer features, scoped to the
-  │                       │   requested pattern(s)
-  └──────────┬────────────┘
-             │  artifacts["features"], artifacts["feature_list"]
-      ┌──────┴──────┐
-      ▼             ▼
-┌───────────┐  ┌───────────┐
-│rule_detect│  │ ml_detect │   IsolationForest (0.6) + LOF (0.4),
-│  R1–R6    │  │           │   both percentile-ranked
-└─────┬─────┘  └─────┬─────┘
-      │ rule_hits[]  │ ml_scores[]
-      └──────┬───────┘
-             ▼
-   ┌────────────────────┐
-   │   risk_classify    │  100 × (0.6 × max_rule_weight + 0.4 × ml_percentile)
-   └─────────┬──────────┘
-             ▼
-       risk_rows[]  →  narrator  →  Flag[] + SAR drafts
+```mermaid
+flowchart TD
+    TX[("Canonical transactions")]
+    FE["feature_engineer<br/>17 per-customer features<br/>scoped to the requested patterns"]
+    RD["rule_detect<br/>R1 to R6 · weights 0.60 to 0.85"]
+    MD["ml_detect<br/>IsolationForest 0.6 + LOF 0.4<br/>both percentile-ranked"]
+    RC["risk_classify<br/>100 x 0.6 max_rule_weight<br/>plus 0.4 ml_percentile"]
+    NA["narrator"]
+    OUT(["Flags with evidence,<br/>explanations and SAR drafts"])
+
+    TX --> FE
+    FE -->|"features · feature_list"| RD
+    FE -->|"features · feature_list"| MD
+    RD -->|rule_hits| RC
+    MD -->|ml_scores| RC
+    RC -->|risk_rows| NA --> OUT
 ```
 
 Why both halves are needed: rules alone cannot catch a pattern nobody wrote a rule for, and an anomaly

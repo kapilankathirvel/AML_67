@@ -8,47 +8,75 @@ pieces fit together and *why* they're shaped the way they are.
 
 ## Component diagram
 
-```
-                         POST /query  {"query": "..."}
-                                │
-                                ▼
-                    ┌───────────────────────┐
-                    │   backend/main.py      │  FastAPI: /query /health
-                    │                        │  /dataset/summary /plan/{id}
-                    └───────────┬───────────┘
-                                │
-        ┌───────────────────────┼───────────────────────┐
-        ▼                       ▼                       ▼
-┌───────────────┐     ┌─────────────────┐     ┌──────────────────┐
-│ intent_parser  │────▶│    planner      │────▶│    executor       │
-│ .py            │     │    .py          │     │    .py            │
-│                │     │                 │     │                   │
-│ QueryIntent    │     │ ExecutionPlan   │     │ runs plan.steps    │
-│ (LLM + regex   │     │ (intent → tool  │     │ against registry,  │
-│  fallback)     │     │  sequence per   │     │ threads ToolContext│
-│                │     │  Contract 4)    │     │ re-plans mid-run   │
-└───────────────┘     └─────────────────┘     └─────────┬─────────┘
-                                                          │
-                                          ┌───────────────┴───────────────┐
-                                          ▼                               ▼
-                              ┌────────────────────┐          ┌──────────────────┐
-                              │  agent/registry.py  │          │   narrator.py     │
-                              │  auto-discovers      │         │  risk_rows →      │
-                              │  backend/tools/*.py  │         │  Flag[] with       │
-                              │  via @tool decorator │         │  explanation + SAR │
-                              └──────────┬───────────┘          └──────────────────┘
-                                         │
-                    ┌────────────────────┼────────────────────┐
-                    ▼                    ▼                    ▼
-            load_data          filter_data          eda_profile
-            feature_engineer   rule_detect           ml_detect
-            aggregate_query    entity_lookup         risk_classify
-            (backend/tools/*.py — Track B, real detection logic)
+```mermaid
+flowchart TD
+    Q(["User query — natural language"])
+
+    subgraph HTTP ["HTTP surface"]
+        API["FastAPI · backend/main.py<br/>POST /query · GET /health<br/>GET /dataset/summary · GET /plan/:id"]
+    end
+
+    subgraph CORE ["Agent core · backend/agent/"]
+        IP["intent_parser<br/>str to QueryIntent"]
+        PL["planner<br/>QueryIntent to ExecutionPlan"]
+        EX["executor<br/>runs plan · threads ToolContext"]
+        NA["narrator<br/>risk rows to flags and SAR drafts"]
+    end
+
+    LLM["llm/client.py<br/>Gemini · OpenAI · Groq · Ollama"]
+    FB["regex fallback<br/>covers all 7 intents alone"]
+    REG["registry<br/>pkgutil auto-discovery of @tool"]
+    RP{{"Runtime re-planning<br/>0 rule hits, append ml_detect<br/>under 50 rows, drop ml_detect<br/>0 rows, halt with explanation"}}
+
+    subgraph TOOLS ["Tool layer · backend/tools/"]
+        direction LR
+        LD["load_data"]
+        FD["filter_data"]
+        EDA["eda_profile"]
+        FE["feature_engineer"]
+        RD["rule_detect"]
+        MD["ml_detect"]
+        AQ["aggregate_query"]
+        EL["entity_lookup"]
+        RC["risk_classify"]
+    end
+
+    RESP["AgentResponse JSON<br/>intent · plan · flags · tables · charts"]
+    UI["Streamlit UI<br/>HTTP client, imports nothing from backend"]
+
+    Q --> API
+    API --> IP
+    IP -.->|primary| LLM
+    IP -.->|always available| FB
+    IP --> PL
+    PL --> EX
+    EX <-->|resolve by name| REG
+    REG --> TOOLS
+    EX --> RP
+    RP -.->|mutates remaining steps| EX
+    EX --> NA
+    NA --> RESP
+    RESP --> API
+    API -->|HTTP| UI
 ```
 
 **The one rule that makes the two-person build possible**: dependencies flow **agent → tools, never the
 reverse**. No tool imports `backend.agent.*`; no tool imports another tool; the Streamlit frontend imports
 nothing from `backend/` at all — HTTP only.
+
+```mermaid
+flowchart LR
+    FE["Streamlit frontend"] -->|HTTP only| API["FastAPI"]
+    API --> AC["Agent core"]
+    AC --> TL["Tool layer"]
+    TL --> DATA[("Canonical schema<br/>transactions · customers")]
+
+    AC -.->|never| FE
+    TL -.->|never imports| AC
+    TL -.->|never imports another| TL
+
+    linkStyle 4,5,6 stroke:#8f2d3c,stroke-dasharray:4 4
+```
 
 ---
 
@@ -167,6 +195,53 @@ returned empty. Scoring the entity fresh (same shape as `entity_investigation`, 
 
 ## Sequence: three contrasting queries
 
+One request end to end first, then the three traces that show how much the shape changes per query.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor A as Analyst
+    participant API as FastAPI
+    participant IP as intent_parser
+    participant PL as planner
+    participant EX as executor
+    participant T as Tool layer
+    participant NA as narrator
+
+    A->>API: POST /query - find structuring in the last 30 days
+    API->>IP: parse_intent(query)
+    Note over IP: LLM in JSON mode<br/>regex fallback on failure or timeout
+    IP-->>API: QueryIntent - pattern_search, structuring, date window
+    API->>PL: build_plan(intent)
+    PL-->>API: ExecutionPlan - 6 steps, eda_profile skipped
+    API->>EX: run_plan(intent, plan)
+
+    EX->>T: load_data
+    T-->>EX: transactions and customers
+    Note over EX: resolve bare entity IDs<br/>against real customer_id values
+    EX->>T: filter_data - date window
+    T-->>EX: narrowed frame
+    EX->>T: feature_engineer - structuring only
+    T-->>EX: 9 of 17 features
+    EX->>T: rule_detect - R1
+    T-->>EX: rule hits with evidence
+
+    alt zero rule hits
+        EX->>EX: append ml_detect to widen the net
+    else filtered set under 50 rows
+        EX->>EX: drop the queued ml_detect
+    end
+
+    EX->>T: ml_detect
+    T-->>EX: percentile-ranked anomaly scores
+    EX->>T: risk_classify
+    T-->>EX: risk rows sorted by score
+    EX->>NA: build_flags(risk_rows)
+    NA-->>EX: flags with evidence, explanation, SAR for high risk
+    EX-->>API: AgentResponse
+    API-->>A: JSON with intent, plan, flags, charts, tables
+```
+
 **"Is customer 4521 suspicious?"** — bare number, entity_investigation
 ```
 parse → entities=["C-04521"] (constructed guess, not yet a real ID)
@@ -205,3 +280,194 @@ narrate → dozens of Flags across HIGH/MEDIUM/LOW, each with its own evidence-b
 - **The full frozen interface**: [docs/CONTRACTS.md](CONTRACTS.md)
 - **Build history, what was fixed and why, test counts over time**: [TRACK_A_PROGRESS.md](TRACK_A_PROGRESS.md)
 - **The two-person parallel-build plan this repo followed**: [WORKPLAN.md](WORKPLAN.md)
+
+---
+
+## Complete system reference
+
+Everything in one view — data sources through adapters, agent-core internals, the artifact handshake
+between tools, the frozen contracts, and the frontend. This is a reference diagram, not a teaching one:
+the three diagrams above each carry a single idea, while this one is for when you want the whole surface
+at once.
+
+```mermaid
+flowchart TD
+
+    %% ==================== DATA SOURCES ====================
+    subgraph SRC ["Data sources — swappable by design"]
+        S1[("IBM AML HI-Small · Kaggle<br/>real-world base")]
+        S2[("Synthetic · seed 42<br/>2002 txns · 270 customers")]
+        S3[("Synthetic alt schema · seed 42<br/>1710 txns · 294 customers")]
+    end
+
+    subgraph ADAPT ["Adapter layer · tools/data_loader.py"]
+        AD1["_adapt_ibm"]
+        AD2["_adapt_synthetic"]
+        AD3["_adapt_synthetic_alt<br/>renamed cols · coded enums"]
+    end
+
+    CANON[("Canonical schema · Contract 0<br/>transactions · customers")]
+
+    S1 --> AD1 --> CANON
+    S2 --> AD2 --> CANON
+    S3 --> AD3 --> CANON
+
+    %% ==================== ENTRY ====================
+    USER(["Analyst · natural-language query"])
+
+    subgraph HTTPX ["HTTP surface · backend/main.py"]
+        EP1["POST /query"]
+        EP2["GET /health"]
+        EP3["GET /dataset/summary"]
+        EP4["GET /plan/:plan_id"]
+    end
+
+    USER --> EP1
+
+    %% ==================== AGENT CORE ====================
+    subgraph COREX ["Agent core · backend/agent/"]
+
+        subgraph G1 ["Step 1 · intent_parser.py"]
+            IP1["classify intent — 7 types<br/>first match wins"]
+            IP2["extract filters · entities · patterns"]
+            IP3["anchor relative dates to<br/>dataset max date, not wall clock"]
+            IP4["coerce provider shorthand<br/>such as minus 30d"]
+        end
+
+        subgraph G2 ["Step 2 · planner.py"]
+            PL1["one branch per intent"]
+            PL2["attach a reason to every step"]
+            PL3["record tools skipped and why"]
+        end
+
+        subgraph G3 ["Step 3 · executor.py"]
+            EX1["thread one ToolContext · time each step"]
+            EX2["conditional re-planning"]
+            EX3["resolve bare entity IDs by numeric match"]
+            EX4["post-risk scoping — entity or top_n"]
+            EX5["failure isolation — step errors, run continues"]
+        end
+
+        subgraph G4 ["Step 4 · narrator.py"]
+            NA1["adapt rule evidence to frozen shape"]
+            NA2["deterministic template explanation"]
+            NA3["LLM polish — top 5 HIGH only"]
+            NA4["SAR draft — HIGH only"]
+        end
+    end
+
+    %% ==================== LLM ====================
+    subgraph LLMX ["LLM layer · backend/llm/client.py"]
+        PV1["Gemini"]
+        PV2["OpenAI"]
+        PV3["Groq"]
+        PV4["Ollama — local, no quota"]
+        CACHE["response cache<br/>successes only, not failures"]
+    end
+
+    RGX["regex and keyword fallback<br/>covers all 7 intents alone"]
+
+    EP1 --> G1
+    G1 -.->|primary, JSON mode| LLMX
+    G1 -.->|always available| RGX
+    LLMX --- CACHE
+    G1 -->|QueryIntent| G2
+    G2 -->|ExecutionPlan| G3
+    G3 -->|risk rows| G4
+
+    RPX{{"Runtime re-planning triggers<br/>zero rule hits — append ml_detect<br/>under 50 rows — drop ml_detect<br/>zero rows — halt with explanation"}}
+    G3 --> RPX
+    RPX -.->|mutates remaining steps| G3
+
+    %% ==================== REGISTRY + TOOLS ====================
+    REGX["registry.py<br/>pkgutil auto-discovery of @tool<br/>clears and reloads on each call"]
+    G3 <-->|resolve by name| REGX
+
+    subgraph TOOLSX ["Tool layer · backend/tools/ — 9 tools, no cross-imports"]
+
+        subgraph TG1 ["Data access"]
+            T1["load_data"]
+            T2["filter_data"]
+            T3["entity_lookup"]
+        end
+
+        subgraph TG2 ["Profiling and aggregation"]
+            T4["eda_profile<br/>5 Plotly figures"]
+            T5["aggregate_query<br/>group-by · threshold · top-N"]
+        end
+
+        subgraph TG3 ["Detection"]
+            T6["feature_engineer<br/>17 features, scoped per pattern"]
+            T7["rule_detect<br/>R1 to R6 · weights 0.60 to 0.85"]
+            T8["ml_detect<br/>IsolationForest 0.6 + LOF 0.4"]
+        end
+
+        subgraph TG4 ["Scoring"]
+            T9["risk_classify<br/>100 x 0.6 rule + 0.4 ml percentile"]
+        end
+    end
+
+    REGX --> TOOLSX
+    CANON --> T1
+
+    %% ---------- artifact handshake between tools ----------
+    T1 -->|ctx.df · customers| T2
+    T2 -->|narrowed df| T6
+    T2 --> T4
+    T2 --> T5
+    T2 --> T3
+    T6 -->|features · feature_list| T7
+    T6 -->|features · feature_list| T8
+    T7 -->|rule_hits with evidence| T9
+    T8 -->|ml_scores · percentiles| T9
+
+    %% ==================== CONTRACTS ====================
+    subgraph FROZEN ["Frozen contracts — written before implementation"]
+        C1["schemas.py · Contract 1<br/>QueryIntent · ExecutionPlan · Flag · AgentResponse"]
+        C2["tools/base.py · Contract 2<br/>ToolContext · ToolResult · @tool"]
+        C3["CONTRACTS.md<br/>Contract 0 schema · Contract 4 intent map"]
+    end
+
+    C1 -.->|validates| COREX
+    C2 -.->|shapes| TOOLSX
+
+    %% ==================== RESPONSE + UI ====================
+    RESPX["AgentResponse JSON<br/>query · intent · plan · flags<br/>tables · charts · metrics · warnings"]
+
+    T9 -->|risk_rows| G4
+    G4 --> RESPX
+    RESPX --> EP1
+
+    subgraph FEX ["Presentation · frontend/ — HTTP client only"]
+        APP["app.py<br/>live mode, fixture fallback"]
+        PT["plan_trace.py<br/>steps · skips · decisions"]
+        FC["flag_cards.py<br/>badge · evidence table · SAR"]
+        CH["charts.py<br/>Plotly JSON rendered as-is"]
+        TH["theme.py<br/>colour tokens · metric alias resolver"]
+        FIX[("fixtures/full_analysis.json<br/>loaded only after a real call fails")]
+    end
+
+    EP1 -->|HTTP| APP
+    EP2 --> APP
+    EP3 --> APP
+    APP --> PT
+    APP --> FC
+    APP --> CH
+    TH -.-> PT
+    TH -.-> FC
+    TH -.-> CH
+    FIX -.->|on API failure| APP
+
+    %% ==================== STYLING ====================
+    classDef core fill:#d7e8e6,stroke:#0d6e69,stroke-width:1px,color:#10201f
+    classDef tool fill:#e6ecef,stroke:#3f5b66,stroke-width:1px,color:#131a1c
+    classDef data fill:#efe7d8,stroke:#8a6a1f,stroke-width:1px,color:#241d0c
+    classDef frozen fill:#f4dfe2,stroke:#8f2d3c,stroke-width:1px,color:#2b1216
+    classDef ui fill:#e3e6f0,stroke:#4a4f7a,stroke-width:1px,color:#15172b
+
+    class IP1,IP2,IP3,IP4,PL1,PL2,PL3,EX1,EX2,EX3,EX4,EX5,NA1,NA2,NA3,NA4,RPX core
+    class T1,T2,T3,T4,T5,T6,T7,T8,T9,REGX tool
+    class S1,S2,S3,AD1,AD2,AD3,CANON data
+    class C1,C2,C3 frozen
+    class APP,PT,FC,CH,TH,FIX ui
+```

@@ -96,29 +96,19 @@ Full intent → tool mapping table: **[docs/CONTRACTS.md](docs/CONTRACTS.md) Con
 
 ## Architecture
 
-```
-User query (NL)
-      │
-      ▼
-┌─────────────────────────────────────────────────────────┐
-│ AGENT CORE  (backend/agent/)                             │
-│  1. IntentParser  → QueryIntent {intent, filters,        │
-│                     entities, pattern_types}              │
-│     · LLM (JSON mode) primary, regex fallback always-on   │
-│  2. Planner       → ExecutionPlan [ToolCall, ...]         │
-│  3. Executor      → runs plan, threads ToolContext,       │
-│                     conditional re-planning, decisions[]  │
-│  4. Narrator      → explanation + escalation per flag      │
-└─────────────────────────────────────────────────────────┘
-      │  resolves tools through the auto-discovering REGISTRY
-      ▼
-TOOL LAYER (backend/tools/)
-  load_data · filter_data · eda_profile · feature_engineer
-  rule_detect · ml_detect · aggregate_query · entity_lookup
-  risk_classify
-      │
-      ▼
-AgentResponse (JSON) → FastAPI → HTTP → Streamlit UI
+```mermaid
+flowchart LR
+    Q(["Natural-language query"]) --> P
+
+    subgraph AGENT ["Agent core"]
+        direction TB
+        P["Parse intent"] --> B["Build a plan for this query"]
+        B --> E["Execute · re-plan mid-run"]
+        E --> N["Score · explain · draft SAR"]
+    end
+
+    E <-->|only the tools the plan needs| T["9 tools<br/>load · filter · features<br/>rules · ML · risk"]
+    N --> R(["Risk-scored flags<br/>and the plan that produced them"])
 ```
 
 **Full technical documentation — architecture, analysis algorithms, and UI design in one place:
