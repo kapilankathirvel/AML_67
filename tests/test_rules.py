@@ -26,7 +26,7 @@ import pytest
 
 from backend.tools.base import ToolContext
 from backend.tools.features import feature_engineer
-from backend.tools.rules import rule_detect
+from backend.tools.rules import _run_r7_inbound_structuring, rule_detect
 
 SAMPLE_TX   = "data/sample/aml_sample.csv"
 SAMPLE_CUST = "data/sample/aml_sample_customers.csv"
@@ -560,17 +560,154 @@ class TestR6DormantReactivation:
 # ---------------------------------------------------------------------------
 
 
+class TestR7InboundStructuring:
+    """R7 — receiver-side structuring.
+
+    The only receiver-keyed rule in the set, so the tests that matter most are
+    the ones proving it flags the *receiver* and that it stays quiet on
+    ordinary inbound traffic.
+    """
+
+    @staticmethod
+    def _txns(rows: list[tuple[str, str, float, str]]) -> pd.DataFrame:
+        """(sender, receiver, amount, ISO timestamp) -> canonical-ish frame."""
+        return pd.DataFrame([
+            {
+                "txn_id": f"T{i:04d}",
+                "timestamp": pd.Timestamp(ts),
+                "sender_id": s,
+                "receiver_id": r,
+                "amount": amt,
+                "currency": "USD",
+                "txn_type": "transfer",
+                "channel": "online",
+                "sender_country": "US",
+                "receiver_country": "US",
+                "is_cross_border": False,
+            }
+            for i, (s, r, amt, ts) in enumerate(rows)
+        ])
+
+    def test_fires_on_two_band_deposits_from_one_sender(self) -> None:
+        df = self._txns([
+            ("C-BAD01", "C-MULE1", 9_500.0, "2025-01-02T10:00:00"),
+            ("C-BAD01", "C-MULE1", 9_800.0, "2025-01-05T10:00:00"),
+        ])
+        hits = _run_r7_inbound_structuring(df, pd.DataFrame())
+
+        assert len(hits) == 1
+        assert hits[0]["entity_id"] == "C-MULE1", "R7 must flag the receiver"
+        assert hits[0]["rule_id"] == "R7"
+        assert hits[0]["weight"] == 0.75
+        assert hits[0]["evidence"]["counterparty"] == "C-BAD01"
+        assert hits[0]["evidence"]["inbound_band_txns_from_one_sender"] == 2
+
+    def test_single_deposit_does_not_fire(self) -> None:
+        """One sub-threshold deposit is ordinary. On the committed dataset no
+        true negative ever exceeds one, which is why the threshold is 2."""
+        df = self._txns([("C-BAD01", "C-MULE1", 9_500.0, "2025-01-02T10:00:00")])
+        assert _run_r7_inbound_structuring(df, pd.DataFrame()) == []
+
+    def test_deposits_outside_the_seven_day_window_do_not_fire(self) -> None:
+        df = self._txns([
+            ("C-BAD01", "C-MULE1", 9_500.0, "2025-01-02T10:00:00"),
+            ("C-BAD01", "C-MULE1", 9_800.0, "2025-01-20T10:00:00"),   # 18 days later
+        ])
+        assert _run_r7_inbound_structuring(df, pd.DataFrame()) == []
+
+    def test_amounts_outside_the_band_do_not_fire(self) -> None:
+        """Below $9,000 is not threshold-adjacent; at or above $10,000 triggers
+        a CTR anyway, so neither is structuring."""
+        df = self._txns([
+            ("C-BAD01", "C-MULE1", 5_000.0, "2025-01-02T10:00:00"),
+            ("C-BAD01", "C-MULE1", 12_000.0, "2025-01-03T10:00:00"),
+        ])
+        assert _run_r7_inbound_structuring(df, pd.DataFrame()) == []
+
+    def test_two_senders_one_deposit_each_does_not_fire(self) -> None:
+        """The signal is per (receiver, sender) pair, not per receiver.
+
+        Two unrelated counterparties each sending one band-range payment is not
+        structuring — and conflating it with the pair signal is exactly what
+        would turn R7 into a false-positive generator.
+        """
+        df = self._txns([
+            ("C-AAA01", "C-MULE1", 9_500.0, "2025-01-02T10:00:00"),
+            ("C-BBB01", "C-MULE1", 9_800.0, "2025-01-03T10:00:00"),
+        ])
+        assert _run_r7_inbound_structuring(df, pd.DataFrame()) == []
+
+    def test_receiver_reported_once_on_its_strongest_relationship(self) -> None:
+        """A receiver fed by two structuring senders yields one hit, describing
+        the denser pair — not one hit per counterparty."""
+        df = self._txns([
+            ("C-AAA01", "C-MULE1", 9_100.0, "2025-01-02T10:00:00"),
+            ("C-AAA01", "C-MULE1", 9_200.0, "2025-01-03T10:00:00"),
+            ("C-BBB01", "C-MULE1", 9_300.0, "2025-01-02T10:00:00"),
+            ("C-BBB01", "C-MULE1", 9_400.0, "2025-01-03T10:00:00"),
+            ("C-BBB01", "C-MULE1", 9_500.0, "2025-01-04T10:00:00"),
+        ])
+        hits = _run_r7_inbound_structuring(df, pd.DataFrame())
+
+        assert len(hits) == 1
+        assert hits[0]["evidence"]["counterparty"] == "C-BBB01"
+        assert hits[0]["evidence"]["inbound_band_txns_from_one_sender"] == 3
+
+    def test_catches_receive_only_positives_with_no_false_positives(
+        self, full_df: pd.DataFrame
+    ) -> None:
+        """The reason R7 exists, measured on the real dataset.
+
+        63 labelled customers appear only as receivers and were previously
+        unreachable by every sender-side rule. R7 recovers 11 of them and — on
+        this data — flags no true negative at all. It does not close the gap:
+        the other 52 receive a single labelled transaction each and are not
+        separable from ordinary counterparties.
+        """
+        from evaluation.harness import load_ground_truth
+
+        _, gt = load_ground_truth()
+        hits = _run_r7_inbound_structuring(full_df, pd.DataFrame())
+        flagged = {h["entity_id"] for h in hits}
+
+        assert flagged <= gt.receive_only, (
+            "R7 flagged something outside the receive-only positive set: "
+            f"{flagged - gt.receive_only}"
+        )
+        assert len(flagged) == 11
+        assert not (flagged - gt.sender_or_receiver), "R7 produced a false positive"
+
+    def test_evidence_carries_what_an_analyst_needs(self, full_df: pd.DataFrame) -> None:
+        hits = _run_r7_inbound_structuring(full_df, pd.DataFrame())
+        assert hits
+
+        for h in hits:
+            ev = h["evidence"]
+            assert ev["inbound_band_txns_from_one_sender"] >= 2
+            assert ev["window_days"] == 7
+            assert ev["band_low"] == 9_000.0 and ev["band_high"] == 9_999.99
+            assert ev["amounts"], "evidence must show the actual amounts"
+            assert all(9_000.0 <= a <= 9_999.99 for a in ev["amounts"])
+            assert len(ev["amounts"]) <= 10, "amounts list should stay readable"
+            assert ev["counterparty"]
+
+
 class TestSelectiveExecution:
-    def test_structuring_pattern_only_fires_r1(
+    def test_structuring_pattern_fires_only_structuring_rules(
         self, structuring_df: pd.DataFrame
     ) -> None:
+        """R1 (sender side) and R7 (receiver side) are both structuring rules.
+
+        This assertion used to be `<= {"R1"}`; R7 was added as the receiver-side
+        mirror of the same typology, so a structuring query now legitimately
+        evaluates both ends of the transaction.
+        """
         ctx = _make_ctx(structuring_df)
         result = rule_detect(ctx, patterns=["structuring"])
         assert result.ok
         hits = result.artifacts["rule_hits"]
         rule_ids = {h["rule_id"] for h in hits}
-        # Only R1 should be evaluated for structuring
-        assert rule_ids <= {"R1"}, (
+        assert rule_ids <= {"R1", "R7"}, (
             f"Unexpected rules fired for pattern=['structuring']: {rule_ids}"
         )
 

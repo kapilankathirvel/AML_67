@@ -57,7 +57,7 @@ medium but not high; high requires at least a moderate ML anomaly score.
 
 ---
 
-## 3. Rules R1–R6
+## 3. Rules R1–R7
 
 ### R1 — Structuring
 
@@ -317,6 +317,62 @@ accounts reactivated for laundering (unusual amounts, sudden high frequency).
 
 ---
 
+### R7 — Structuring, Receiver Side
+
+**Weight:** `0.75`
+
+**Condition:** an account **receives** ≥ 2 transactions in the $9,000–$9,999.99 band from a
+**single counterparty** within a 7-day window.
+
+**Business justification:**
+R1 detects the person making structured deposits. R7 detects the account they are being made
+*into*. Under 31 U.S.C. § 5324 the offence attaches to the structuring itself, and the beneficiary
+account is where the aggregated proceeds land — it is exactly what a SAR narrative would describe.
+Without it every rule here is sender-side, which leaves the receiving half of the same scheme
+invisible.
+
+**Why the threshold is 2, not R1's 3:**
+The signal is measured per *(receiver, sender) pair*, which is far narrower than R1's per-sender
+aggregate. On the committed dataset no true negative ever exceeds one such pair-window
+transaction, so 2 already separates cleanly — measured, not assumed.
+
+**Why this is not fan-in detection:**
+The intuitive receiver-side rule is a funnel account: many distinct senders converging on one
+account. That was tested against this dataset and rejected. Customers who appear only as receivers
+of labelled transactions average **7.6 distinct inbound counterparties** against a population
+average of **6.9**, and within any 48-hour window both top out at 4 — there is no separation to
+threshold on, and the highest fan-in accounts in the data are negatives. The discriminating signal
+is the repeated pair relationship, not the breadth of counterparties.
+
+**Coverage, honestly:**
+R7 recovers 12 of the 63 receive-only positives with no measured false positives. The other 51 are
+not reachable by any inbound rule: 26 of them receive exactly one labelled transaction, which is
+indistinguishable from being an innocent counterparty of a bad actor. Closing that remainder would
+need a signal this dataset does not carry — shared account ownership, KYC linkage, or device
+overlap.
+
+**Weight rationale:**
+0.75, below R1's 0.85. Receiving structured deposits is a strong signal, but attribution is weaker
+than for the sender: the account holder may be a willing mule or an unwitting recipient. At 0.75 a
+rule-only hit scores 45 — MEDIUM, "review" — so it reaches an analyst without auto-drafting a SAR,
+which is the appropriate confidence level for a passive-side signal.
+
+**Evidence dict shape:**
+```python
+{
+    "inbound_band_txns_from_one_sender": 9,
+    "counterparty": "C-STR05",
+    "window_days": 7,
+    "amounts": [9930.35, 9927.0, 9923.28, 9754.48, 9636.59],
+    "band_low": 9000.0,
+    "band_high": 9999.99,
+    "total": 85418.7,
+    "pair_band_txns_overall": 9
+}
+```
+
+---
+
 ## 4. Feature → Rule Cross-Reference
 
 | Feature | R1 | R2 | R3 | R4 | R5 | R6 |
@@ -387,3 +443,9 @@ core false-positive reduction mechanism for the structuring detector.
 
 The combination of **rule hits + ML anomaly score** (Contract 5 formula) ensures that no single
 weak rule alone reaches `high` escalation — requiring corroboration before a SAR is drafted.
+
+**Measured, not asserted.** The comparison table is generated from the labelled dataset by
+`python -m evaluation.run_evaluation`, which writes `evaluation/results/`. Against the naive rule
+the system flags **6.6× fewer customers at a 13× lower false-positive rate**, reaching **0.897
+precision** under the broader ground truth where the naive rule manages 0.421. Do not hand-edit
+those figures anywhere in the docs — regenerate them.

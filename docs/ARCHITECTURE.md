@@ -266,7 +266,7 @@ narrate → no Flags at all (by design — this intent skips risk_classify entir
 ```
 parse → no filters/entities, full_analysis
 plan  → all 6 tools, nothing skipped
-exec  → eda_profile runs alongside detection; rule_detect finds hits across R1-R6;
+exec  → eda_profile runs alongside detection; rule_detect finds hits across R1-R7;
         ml_detect scores every customer; risk_classify fuses both signals
 narrate → dozens of Flags across HIGH/MEDIUM/LOW, each with its own evidence-based explanation
 ```

@@ -20,6 +20,7 @@ RULE_NAMES = {
     "R4": "Rapid cash-out",
     "R5": "Velocity spike",
     "R6": "Dormant reactivation",
+    "R7": "Inbound structuring",
 }
 
 ESCALATION_BY_LEVEL: dict[RiskLevel, Escalation] = {

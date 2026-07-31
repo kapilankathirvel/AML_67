@@ -66,6 +66,12 @@ _RULE_TO_PATTERN: dict[str, str] = {
     "R4": "rapid_cashout",
     "R5": "velocity",
     "R6": "dormant_reactivation",
+    # R7 is receiver-side structuring — the beneficiary account of the same
+    # scheme R1 detects on the sending side. It maps onto the existing
+    # "structuring" pattern deliberately: it is the same typology viewed from
+    # the other end of the transaction, and reusing the name avoids widening
+    # the frozen PatternType literal in backend/schemas.py.
+    "R7": "structuring",
 }
 
 

@@ -86,6 +86,15 @@ R6_BURST_TXNS         = 3
 R6_BURST_WINDOW_DAYS  = 7
 R6_BURST_ZSCORE       = 2.0
 
+# R7 — receiver-side structuring. Mirrors R1 across the transaction: instead of
+# a customer *sending* repeated sub-threshold amounts, an account *receives*
+# them from a single counterparty. Threshold is 2 rather than R1's 3 because
+# the signal is measured per (receiver, sender) pair, which is far narrower
+# than R1's per-sender aggregate: on the committed dataset no true negative
+# ever exceeds 1 such pair-window transaction, so 2 already separates cleanly.
+R7_MIN_BAND_TXNS      = 2
+R7_WINDOW_DAYS        = 7
+
 
 # ---------------------------------------------------------------------------
 # Rule implementations
@@ -637,21 +646,117 @@ def _run_r6_dormant_reactivation(
     return hits
 
 
+def _run_r7_inbound_structuring(
+    df: pd.DataFrame,
+    features: pd.DataFrame,
+) -> list[dict[str, Any]]:
+    """R7 — Receiver-side structuring: an account *receiving* repeated
+    sub-threshold deposits from a single counterparty within 7 days.
+
+    Why this rule exists
+    --------------------
+    Every other rule here is sender-side, which leaves the beneficiary accounts
+    of a structuring scheme completely invisible. On the committed dataset, 63
+    of 114 labelled customers appear only as *receivers* of laundering
+    transactions — nothing could flag them.
+
+    Why it is not fan-in detection
+    ------------------------------
+    The obvious fix is a classic funnel-account rule ("many distinct senders
+    converge on one account"), and it does not work on this data: the 63
+    receive-only positives average 7.6 distinct inbound counterparties against
+    a population average of 6.9, and in any 48-hour window both top out at 4.
+    There is no separation to threshold on. Measured, not assumed.
+
+    What does separate is the *pair* signal below — repeated band-range
+    deposits from one specific sender. No true negative in the dataset exceeds
+    a single such transaction, so R7_MIN_BAND_TXNS = 2 already gives clean
+    separation. This catches 11 of the 63; the remainder receive one labelled
+    transaction each and are genuinely indistinguishable from ordinary
+    counterparties.
+
+    Weight rationale
+    ----------------
+    0.75, below R1's 0.85. Receiving structured deposits is a strong signal,
+    but attribution is weaker than for the sender: the account holder may be a
+    willing mule or an unwitting recipient. At 0.75 a rule-only hit scores 45 —
+    MEDIUM, "review" — so it reaches an analyst without auto-drafting a SAR,
+    which is the right level of confidence for a passive-side signal.
+    """
+    hits: list[dict[str, Any]] = []
+    band = df[(df["amount"] >= BAND_LOW) & (df["amount"] <= BAND_HIGH)]
+    if len(band) == 0:
+        return hits
+
+    band = band.sort_values("timestamp")
+    window_ns = int(R7_WINDOW_DAYS * 24 * 3600 * 1e9)
+
+    # Best (densest) pair-window per receiver, so a receiver fed by several
+    # senders is reported on its strongest single relationship rather than once
+    # per counterparty.
+    best: dict[str, dict[str, Any]] = {}
+
+    for (rid, sid), grp in band.groupby(["receiver_id", "sender_id"]):
+        if len(grp) < R7_MIN_BAND_TXNS:
+            continue
+
+        ts = grp["timestamp"].values
+        amounts_arr = grp["amount"].values
+        window_amounts: list[float] = []
+        for i in range(len(ts)):
+            in_window = amounts_arr[(ts - ts[i] >= 0) & (ts - ts[i] <= window_ns)]
+            if len(in_window) >= R7_MIN_BAND_TXNS and len(in_window) > len(window_amounts):
+                window_amounts = sorted(in_window.tolist(), reverse=True)
+
+        if not window_amounts:
+            continue
+
+        prior = best.get(rid)
+        if prior is None or len(window_amounts) > prior["count"]:
+            best[rid] = {
+                "count": len(window_amounts),
+                "sender": str(sid),
+                "amounts": window_amounts,
+                "pair_total_in_band": int(len(grp)),
+            }
+
+    for rid, info in best.items():
+        hits.append({
+            "entity_id": str(rid),
+            "rule_id": "R7",
+            "evidence": {
+                "inbound_band_txns_from_one_sender": info["count"],
+                "counterparty": info["sender"],
+                "window_days": R7_WINDOW_DAYS,
+                "amounts": info["amounts"][:10],
+                "band_low": BAND_LOW,
+                "band_high": BAND_HIGH,
+                "total": round(float(sum(info["amounts"])), 2),
+                "pair_band_txns_overall": info["pair_total_in_band"],
+            },
+            "weight": 0.75,
+        })
+
+    return hits
+
+
 # ---------------------------------------------------------------------------
 # Pattern → rule mapping (selective execution)
 # ---------------------------------------------------------------------------
 
 _PATTERN_RULES: dict[str, list[str]] = {
-    "structuring":          ["R1"],
+    # R7 is receiver-side structuring, so a structuring query runs both sides
+    # of the transaction rather than only the sender.
+    "structuring":          ["R1", "R7"],
     "smurfing":             ["R2"],
     "layering":             ["R3"],
     "rapid_cashout":        ["R4"],
     "velocity":             ["R5"],
     "dormant_reactivation": ["R6"],
-    "unknown":              ["R1", "R2", "R3", "R4", "R5", "R6"],
+    "unknown":              ["R1", "R2", "R3", "R4", "R5", "R6", "R7"],
 }
 
-_ALL_RULES = {"R1", "R2", "R3", "R4", "R5", "R6"}
+_ALL_RULES = {"R1", "R2", "R3", "R4", "R5", "R6", "R7"}
 
 
 # ---------------------------------------------------------------------------
@@ -670,7 +775,7 @@ _ALL_RULES = {"R1", "R2", "R3", "R4", "R5", "R6"}
         ),
     },
     description=(
-        "Apply rule-based AML detectors R1-R6 (per AML_LOGIC.md) to the working set. "
+        "Apply rule-based AML detectors R1-R7 (per AML_LOGIC.md) to the working set. "
         "Reads ctx.artifacts['features'] — must run feature_engineer first. "
         "Returns artifacts['rule_hits'] as list[{entity_id, rule_id, evidence, weight}]."
     ),
@@ -680,10 +785,14 @@ def rule_detect(
     patterns: Optional[list[str]] = None,
     **kw,
 ) -> ToolResult:
-    """Run rule-based AML detectors R1-R6.
+    """Run rule-based AML detectors R1-R7.
 
     Reads ctx.artifacts["features"] for feature-based rules (R5).
-    R1-R4, R6 operate directly on ctx.df for raw signal computation.
+    R1-R4, R6, R7 operate directly on ctx.df for raw signal computation.
+
+    R7 is the only receiver-side rule: it emits hits keyed on receiver_id, so
+    it can flag customers who never appear as a sender at all. Everything else
+    here is sender-side.
     """
     try:
         df = ctx.df
@@ -739,6 +848,11 @@ def rule_detect(
             h = _run_r6_dormant_reactivation(df, features)
             all_hits.extend(h)
             per_rule_counts["R6"] = len(h)
+
+        if "R7" in rules_to_run:
+            h = _run_r7_inbound_structuring(df, features)
+            all_hits.extend(h)
+            per_rule_counts["R7"] = len(h)
 
         # Build notes per rule
         notes = []

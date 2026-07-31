@@ -23,7 +23,7 @@ the relevant deep-dive document is linked at the end of the section.
 3. [Analysis algorithms](#3-analysis-algorithms)
    - [3.1 Detection pipeline overview](#31-detection-pipeline-overview)
    - [3.2 Feature engineering](#32-feature-engineering)
-   - [3.3 Rule engine (R1–R6)](#33-rule-engine-r1r6)
+   - [3.3 Rule engine (R1–R7)](#33-rule-engine-r1r7)
    - [3.4 ML anomaly detection](#34-ml-anomaly-detection)
    - [3.5 Score fusion and risk banding](#35-score-fusion-and-risk-banding)
    - [3.6 Explanation and SAR generation](#36-explanation-and-sar-generation)
@@ -57,7 +57,7 @@ genuinely different tool sequences, and the system logs every tool it chose *not
 | **Agent core** | 4 components: intent parser → planner → executor → narrator |
 | **Tool layer** | 9 auto-discovered tools |
 | **Intents** | 7 (`full_analysis`, `pattern_search`, `threshold_query`, `entity_investigation`, `ranking`, `eda`, `explain_flag`) |
-| **Detection** | 6 rules (R1–R6) + 2 unsupervised ML models, fused into one 0–100 risk score |
+| **Detection** | 7 rules (R1–R7) + 2 unsupervised ML models, fused into one 0–100 risk score |
 | **Features** | 17 per-customer AML features, computed on demand per pattern |
 | **Test suite** | 208 tests (`pytest tests/`) |
 
@@ -248,7 +248,7 @@ Nine tools, each a single function decorated with `@tool` and living in its own 
 | `filter_data` | Composable filters (date, country, txn type, amount, min txn count, segment); never mutates in place |
 | `eda_profile` | Profile stats + 5 Plotly figures (amount histogram, threshold proximity, txn type, country, volume timeseries) |
 | `feature_engineer` | 17 per-customer AML features, scoped to requested patterns |
-| `rule_detect` | Rules R1–R6; emits per-rule evidence dicts |
+| `rule_detect` | Rules R1–R7; emits per-rule evidence dicts |
 | `ml_detect` | IsolationForest + LocalOutlierFactor anomaly scoring |
 | `aggregate_query` | Deterministic group-by/aggregate with threshold and top-N |
 | `entity_lookup` | One customer's profile + recent transaction table |
@@ -439,7 +439,7 @@ expensive step in the pipeline.
 | `velocity` | rolling 1d, `velocity_txns_per_hour`, `amount_zscore_90d` |
 | `dormant_reactivation` | rolling 7d, `amount_zscore_90d` (dormancy gap computed directly from timestamps) |
 
-### 3.3 Rule engine (R1–R6)
+### 3.3 Rule engine (R1–R7)
 
 `backend/tools/rules.py`. Each rule emits a **rule-specific evidence dict** — structuring's fields differ
 from layering's — which flows through unchanged to the explanation layer. Nothing is summarised away
@@ -453,6 +453,7 @@ before a human sees it.
 | **R4** | Rapid cash-out | `0.75` | Inbound ≥ $10,000, ≥ 3 cash withdrawals, cash-out ratio ≥ 0.50, within 24h, via ATM or branch |
 | **R5** | High velocity | `0.65` | ≥ 2.0 txns/hour **and** amount z-score ≥ 3.0 |
 | **R6** | Dormant reactivation | `0.60` | ≥ 60 days dormant, then ≥ 3 transactions in 7 days with z-score ≥ 2.0 |
+| **R7** | Structuring, receiver side | `0.75` | ≥ 2 *inbound* transactions in the $9,000–$9,999.99 band from a **single** counterparty within 7 days |
 
 **Why every rule is a conjunction, never a single threshold.** R1 does not fire on "any transaction over
 $9,000" — that naive rule flags 96% of customers in the demo dataset. It requires a *pattern*: repeated
@@ -468,7 +469,21 @@ without them a dense dataset makes the query hang rather than return.
 **Weights are calibrated to evidence strength, not pattern severity.** R1 carries the highest weight
 (0.85) because sub-threshold clustering is close to unambiguous. R6 carries the lowest (0.60) because
 dormant reactivation has many innocent explanations — an inheritance, a returning expatriate, a seasonal
-business.
+business. R7 sits at 0.75 rather than matching R1: receiving structured deposits is a strong signal, but
+attribution is weaker than for the sender, since the account holder may be a willing mule or an unwitting
+recipient. A rule-only R7 hit therefore scores 45 — MEDIUM, "review" — reaching an analyst without
+auto-drafting a SAR.
+
+**R7 is the only receiver-side rule, and it is deliberately not fan-in detection.** Every other rule and
+all 17 features evaluate outbound behaviour, which left the beneficiary accounts of a structuring scheme
+invisible: 63 of 114 labelled customers on the sample dataset appear only as receivers. The obvious fix
+is a classic funnel-account rule — many distinct senders converging on one account — and it was tested
+and rejected because it does not discriminate on this data. Receive-only positives average **7.6 distinct
+inbound counterparties against a population average of 6.9**, and in any 48-hour window both peak at 4.
+What does separate cleanly is the *pair* signal in R7: repeated band-range deposits from one specific
+sender, where no true negative in the dataset exceeds a single such transaction. R7 recovers 12 of the 63;
+the remaining 51 receive one labelled transaction each and are not distinguishable from ordinary
+counterparties of a bad actor.
 
 Full regulatory citations (BSA, FATF Recommendations 1/3/10, FinCEN SAR requirements), per-rule
 worked examples, and threshold justification: **[AML_LOGIC.md](AML_LOGIC.md)**.

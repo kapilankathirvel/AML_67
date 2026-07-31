@@ -59,7 +59,8 @@ Full regulatory citations, per-rule thresholds, and business justification: **[A
 **Hybrid detection = rule-based (explainable, precise) + ML anomaly detection (recall, catches novel
 patterns) + a fused risk score.**
 
-- **Rules R1–R6** (structuring, smurfing, layering, rapid cash-out, velocity spike, dormant reactivation)
+- **Rules R1–R7** (structuring, smurfing, layering, rapid cash-out, velocity spike, dormant
+  reactivation, and receiver-side structuring)
   — each with a documented regulatory rationale and threshold, emitting rule-specific evidence.
 - **ML**: IsolationForest + LocalOutlierFactor over per-customer AML features (rolling sums,
   threshold-proximity ratio, self-deviation z-scores, velocity, pass-through ratios, ...).
@@ -140,7 +141,7 @@ soc/
 │       ├── data_loader.py        # Kaggle/synthetic CSV → canonical schema
 │       ├── filters.py, aggregate.py, entity.py, eda.py
 │       ├── features.py           # per-customer AML feature engineering
-│       ├── rules.py              # R1–R6 rule-based detectors
+│       ├── rules.py              # R1–R7 rule-based detectors
 │       ├── ml_detect.py           # IsolationForest + LocalOutlierFactor
 │       └── risk.py                # rule + ML score fusion → HIGH/MEDIUM/LOW/NONE
 ├── frontend/
@@ -277,34 +278,65 @@ structuring/smurfing/rapid-cashout/layering cohorts; see [DATA_CARD.md](docs/DAT
 against the raw IBM Kaggle dataset — that requires a Kaggle download not run in this environment; the
 synthetic set is the labelled ground truth actually available here.
 
-> **Note:** `load_data` now defaults to the alt-schema synthetic dataset (`source="synthetic_alt"`, see
-> [Datasets](#datasets)) for live queries. The precision/recall table below has not yet been re-run against
-> that dataset's ground truth — it reflects a validation pass against the original `aml_sample.csv` only.
+Every number below is **generated, not hand-written** — regenerate with:
 
-**Methodology**: our system flags *customers*, not individual transactions, so ground truth is aggregated
-to the customer level: a customer is a true positive if they are the **sender** of at least one labelled
-transaction (51 of 270 customers) — chosen because our rules evaluate sender-side behavior (structuring,
-fan-out, self-deviation), not because it's the number that looks best. The naive baseline
-([AML_LOGIC.md](docs/AML_LOGIC.md) §6: "flag any transaction with `amount > $9,000`") is translated the same
-way, to a fair customer-level comparison: any customer who sent at least one such transaction.
+```bash
+python -m evaluation.run_evaluation
+```
+
+> **Note:** `load_data` defaults to the alt-schema synthetic dataset (`source="synthetic_alt"`, see
+> [Datasets](#datasets)) for live queries. The evaluation pins `source="synthetic"` explicitly, because
+> the labelled ground truth lives in `aml_sample.csv`; scoring flags from one dataset against labels from
+> the other silently compares two different customer populations, and the harness now fails loudly rather
+> than reporting it.
+
+**Methodology**: our system flags *customers*, not individual transactions, so transaction labels must be
+lifted to customer level. There are two defensible ways to do that, and they answer different questions,
+so both are reported:
+
+- **Sender-side** — positive if the customer *sent* at least one labelled transaction (51 of 270). This
+  matches what most rules look at.
+- **Broader** — positive if they sent *or received* one (114 of 270). The extra 63 are receive-only
+  participants, e.g. the destination accounts in a structuring scheme.
+
+The naive baseline ([AML_LOGIC.md](docs/AML_LOGIC.md) §6: "flag any transaction with `amount > $9,000`") is
+translated the same way, to a fair customer-level comparison.
+
+**Sender-side ground truth**
 
 | | Flagged | Precision | Recall | False-positive rate |
 |---|---|---|---|---|
 | **Naive baseline** (any txn > $9,000) | 259 / 270 | 0.197 | 1.000 | 0.950 |
-| **Our system — any flag** (LOW/MEDIUM/HIGH) | 30 / 270 | 0.767 | 0.451 | 0.032 |
-| **Our system — HIGH only** (the SAR-draft tier) | 23 / 270 | 0.913 | 0.412 | 0.009 |
+| **Our system — any flag** (LOW/MEDIUM/HIGH) | 39 / 270 | 0.590 | 0.451 | 0.073 |
+| **Our system — HIGH only** (the SAR-draft tier) | 27 / 270 | 0.778 | 0.412 | 0.027 |
 
-The naive rule "catches everything" (recall 1.00) by flagging 96% of all customers — exactly the
-compliance-team-drowning-in-false-positives problem the brief describes. Our system flags **8.8× fewer
-customers** (30 vs. 259) while still catching 45% of true positives, at a **~30× lower false-positive
-rate** (3.2% vs. 95.0%) — and at the `HIGH`/SAR tier specifically, a false-positive rate of under 1%.
+**Broader ground truth (sender or receiver)**
 
-**Honest limitation, not hidden**: using a broader ground truth (sender *or* receiver of a labelled
-transaction, 114 customers) drops our recall to ~22%. The gap is 63 customers who only ever *receive*
-funds in a labelled pattern (e.g. individual recipients in a fan-out/smurfing distribution) and never
-exhibit outbound behavior themselves — our rules are sender/outbound-focused and correctly don't flag
-them on senders-only signals, since they have none. This is a real, documented gap (no receiver-side/fan-in
-detection yet), not a scoring artifact — see [Limitations](#limitations).
+| | Flagged | Precision | Recall | False-positive rate |
+|---|---|---|---|---|
+| **Naive baseline** (any txn > $9,000) | 259 / 270 | 0.421 | 0.956 | 0.962 |
+| **Our system — any flag** (LOW/MEDIUM/HIGH) | 39 / 270 | 0.897 | 0.307 | 0.026 |
+| **Our system — HIGH only** (the SAR-draft tier) | 27 / 270 | 0.926 | 0.219 | 0.013 |
+
+The naive rule "catches everything" by flagging 96% of all customers — exactly the
+compliance-team-drowning-in-false-positives problem the brief describes. Our system flags **6.6× fewer
+customers** (39 vs. 259) at a **13× lower false-positive rate**, and under the broader ground truth
+reaches **0.897 precision** — while the naive rule manages 0.421.
+
+**Why one table looks worse than the other.** R7 (receiver-side structuring) flags accounts that *receive*
+repeated sub-threshold deposits. Those customers are positives under the broader definition and
+**negatives under the sender-side one**, so the same 11 flags read as true positives in one table and
+false positives in the other. That is a property of the ground truth, not of the detector: flagging the
+beneficiary account of a structuring scheme is correct AML practice, and the sender-side definition simply
+cannot credit it. Before R7, sender-side precision was 0.793 and broader recall was 0.219.
+
+**The receiver-side gap is structural, and mostly cannot be closed.** 63 customers appear only as
+receivers of labelled transactions. R7 recovers 12 of them with no measured false positives. The other 51
+are not reachable by any inbound rule, and we checked rather than assumed: a classic fan-in ("funnel
+account") rule has no discriminative power on this data, because the receive-only positives average **7.6
+distinct inbound counterparties against a population average of 6.9**, and in any 48-hour window both top
+out at 4. There is no separation to threshold on. 26 of the 51 receive exactly one labelled transaction —
+indistinguishable from being an ordinary counterparty of a bad actor.
 
 R5 (velocity) and R6 (dormant reactivation) never fire on this dataset (0 hits each) — the synthetic
 generator doesn't inject cohorts for those two patterns, so they're implemented and rule-tested
@@ -328,12 +360,15 @@ generator doesn't inject cohorts for those two patterns, so they're implemented 
   There's no name-based lookup.
 - **`explain_flag` re-scores the entity fresh** rather than reusing a cached prior run — simpler and
   always correct, but means it can't explain a flag from a run using different filters than "all data."
-- **Detection is sender/outbound-focused; no receiver-side or fan-in detection.** Validated against the
-  synthetic ground truth (see Results): recall is ~45% for customers who exhibit suspicious *outbound*
-  behavior, but customers who only ever *receive* funds as part of a labelled pattern (e.g. individual
-  recipients in a fan-out distribution) aren't caught, since no rule or feature currently evaluates
-  inbound/fan-in patterns. Extending R2 (or adding a new rule) to also flag high fan-in receivers would be
-  the natural next step.
+- **Detection is overwhelmingly sender-side, and the remaining receiver-side gap is structural.** R7 is
+  the one receiver-keyed rule; every other rule and all 17 features evaluate outbound behaviour. Of the 63
+  customers who appear only as receivers of labelled transactions, R7 recovers 12 and 51 remain
+  unreachable. That is not a missing-rule problem: we tested the obvious fix and it fails. A classic
+  fan-in ("funnel account") rule cannot discriminate here — receive-only positives average 7.6 distinct
+  inbound counterparties versus a population average of 6.9, and in any 48-hour window both peak at 4.
+  26 of the 51 receive exactly one labelled transaction, which is not distinguishable from being an
+  innocent counterparty. Closing the rest would need a signal this dataset does not contain — account
+  ownership, KYC linkage, or device/IP overlap.
 - Batch analysis over a sample dataset, not live streaming — explicitly in scope per the brief.
 - Synthetic data documents its own generation assumptions (seed, thresholds, ring sizes) in
   [DATA_CARD.md](docs/DATA_CARD.md) — real-world deployment would need those revalidated against production

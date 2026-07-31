@@ -64,8 +64,12 @@ def test_pattern_search_scopes_features_and_rules(real_tools):
     response = run_plan(intent, plan)
 
     assert all(s.status == "ok" for s in plan.steps)
-    # only R1 should have been evaluated, not all 6 rules
-    assert response.metrics.get("rules_evaluated") == ["R1"]
+    # Only the structuring rules should have been evaluated, not the full set.
+    # That is R1 (sender side) and R7 (receiver side) — R7 was added as the
+    # mirror of the same typology, so scoping to "structuring" legitimately
+    # runs both ends of the transaction. The point of this assertion is that
+    # smurfing/layering/cashout/velocity/dormancy rules stayed out.
+    assert response.metrics.get("rules_evaluated") == ["R1", "R7"]
     assert response.flags
 
 
@@ -201,38 +205,36 @@ def test_false_positive_reduction_vs_naive_baseline(real_tools):
     tuning) — if this ever fails, the false-positive-reduction story in the
     README is no longer true and needs re-validating, not just re-asserting.
     """
-    import pandas as pd
+    from evaluation.harness import evaluate, load_ground_truth, naive_baseline
 
     intent = QueryIntent(raw_query="Analyse this dataset for suspicious activity",
                           intent="full_analysis", parsed_by="rules", confidence=0.9)
     plan = build_plan(intent)
+    # load_data defaults to source="synthetic_alt", a different dataset from the
+    # labelled one this test scores against. Pin it, or the flags and the labels
+    # describe different populations and the comparison is meaningless.
+    for step in plan.steps:
+        if step.tool == "load_data":
+            step.params = {**step.params, "source": "synthetic"}
     response = run_plan(intent, plan)
     our_flagged = {f.entity_id for f in response.flags}
 
-    df = pd.read_csv("data/sample/aml_sample.csv")
-    cust = pd.read_csv("data/sample/aml_sample_customers.csv")
-    all_customers = set(cust["customer_id"])
-    positives = set(df[df.label_is_laundering == True]["sender_id"]) & all_customers
-    negatives = all_customers - positives
-    naive_flagged = set(df[df.amount > 9000]["sender_id"].unique()) & all_customers
+    df, gt = load_ground_truth()
+    naive_flagged = naive_baseline(df, gt.all_customers)
 
-    def false_positive_rate(flagged):
-        fp = len(flagged & negatives)
-        tn = len(negatives - flagged)
-        return fp / (fp + tn) if (fp + tn) else 0.0
+    ours = evaluate(our_flagged, gt.sender_only, gt.all_customers)
+    naive = evaluate(naive_flagged, gt.sender_only, gt.all_customers)
 
-    naive_fpr = false_positive_rate(naive_flagged)
-    our_fpr = false_positive_rate(our_flagged)
-
-    assert len(our_flagged) < len(naive_flagged) / 5, (
-        f"our system flagged {len(our_flagged)}, naive flagged {len(naive_flagged)} — "
+    assert ours.flagged < naive.flagged / 5, (
+        f"our system flagged {ours.flagged}, naive flagged {naive.flagged} — "
         "expected at least a 5x reduction in flagged customers"
     )
-    assert our_fpr < naive_fpr / 5, (
-        f"our FPR {our_fpr:.3f} vs naive FPR {naive_fpr:.3f} — expected at least a 5x FPR reduction"
+    assert ours.false_positive_rate < naive.false_positive_rate / 5, (
+        f"our FPR {ours.false_positive_rate:.3f} vs naive FPR "
+        f"{naive.false_positive_rate:.3f} — expected at least a 5x FPR reduction"
     )
     # sanity: we shouldn't be achieving low FPR by simply not flagging anyone
-    assert len(our_flagged & positives) > 0, "our system caught zero true positives"
+    assert ours.true_positives > 0, "our system caught zero true positives"
 
 
 def test_full_analysis_response_is_actually_json_serializable(real_tools):

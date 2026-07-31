@@ -1,0 +1,91 @@
+{
+  "_comment": "Regenerate with: python -m evaluation.run_evaluation \u2014 'results' and 'ground_truth' are deterministic and safe to diff between runs; 'run_metadata' is not.",
+  "run_metadata": {
+    "generated_utc": "2026-07-31T08:45:22+00:00",
+    "python": "3.11.7",
+    "deterministic_run": true
+  },
+  "dataset": {
+    "transactions_csv": "data/sample/aml_sample.csv",
+    "customers_csv": "data/sample/aml_sample_customers.csv"
+  },
+  "ground_truth": {
+    "customers_total": 270,
+    "labelled_transactions": 202,
+    "positives_sender_only": 51,
+    "positives_sender_or_receiver": 114,
+    "positives_receive_only": 63
+  },
+  "results": {
+    "sender_only": {
+      "naive": {
+        "flagged": 259,
+        "true_positives": 51,
+        "false_positives": 208,
+        "false_negatives": 0,
+        "true_negatives": 11,
+        "precision": 0.1969111969111969,
+        "recall": 1.0,
+        "f1": 0.3290322580645161,
+        "false_positive_rate": 0.9497716894977168
+      },
+      "any_flag": {
+        "flagged": 39,
+        "true_positives": 23,
+        "false_positives": 16,
+        "false_negatives": 28,
+        "true_negatives": 203,
+        "precision": 0.5897435897435898,
+        "recall": 0.45098039215686275,
+        "f1": 0.5111111111111111,
+        "false_positive_rate": 0.0730593607305936
+      },
+      "high_only": {
+        "flagged": 27,
+        "true_positives": 21,
+        "false_positives": 6,
+        "false_negatives": 30,
+        "true_negatives": 213,
+        "precision": 0.7777777777777778,
+        "recall": 0.4117647058823529,
+        "f1": 0.5384615384615384,
+        "false_positive_rate": 0.0273972602739726
+      }
+    },
+    "sender_or_receiver": {
+      "naive": {
+        "flagged": 259,
+        "true_positives": 109,
+        "false_positives": 150,
+        "false_negatives": 5,
+        "true_negatives": 6,
+        "precision": 0.42084942084942084,
+        "recall": 0.956140350877193,
+        "f1": 0.5844504021447722,
+        "false_positive_rate": 0.9615384615384616
+      },
+      "any_flag": {
+        "flagged": 39,
+        "true_positives": 35,
+        "false_positives": 4,
+        "false_negatives": 79,
+        "true_negatives": 152,
+        "precision": 0.8974358974358975,
+        "recall": 0.30701754385964913,
+        "f1": 0.45751633986928114,
+        "false_positive_rate": 0.02564102564102564
+      },
+      "high_only": {
+        "flagged": 27,
+        "true_positives": 25,
+        "false_positives": 2,
+        "false_negatives": 89,
+        "true_negatives": 154,
+        "precision": 0.9259259259259259,
+        "recall": 0.21929824561403508,
+        "f1": 0.3546099290780142,
+        "false_positive_rate": 0.01282051282051282
+      }
+    }
+  }
+}
