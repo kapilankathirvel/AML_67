@@ -442,6 +442,111 @@ def test_bare_string_pattern_value_is_checked_not_iterated_as_chars(monkeypatch)
 
 
 # ---------------------------------------------------------------------------
+# V14 — capabilities a plan may not reach, and aggregate_query's threshold
+# ---------------------------------------------------------------------------
+
+
+def _threshold_plan(agg_params=None):
+    return {"steps": [
+        {"tool": "load_data", "params": {}, "reason": "load"},
+        {"tool": "filter_data", "params": {}, "reason": "narrow"},
+        {"tool": "aggregate_query", "params": agg_params or {}, "reason": "count per sender"},
+    ]}
+
+
+def test_aggregate_query_threshold_is_injected(monkeypatch):
+    """The silent-wrong-answer bug: aggregate_query defaults threshold to None,
+    the deterministic planner always sets it from the parsed query, and nothing
+    was passing it into an LLM plan. "Which customers made 10+ transactions?"
+    ran with no threshold and returned every sender."""
+    _enable(monkeypatch)
+    _stub_llm(monkeypatch, _threshold_plan())
+    intent = _intent("threshold_query", filters=Filters(min_txn_count=10))
+    plan = plan_query(intent)
+
+    assert "source=llm" in _decisions(plan)
+    params = next(s.params for s in plan.steps if s.tool == "aggregate_query")
+    assert params["threshold"] == 10
+    assert params["group_by"] == ["sender_id"]
+    assert params["agg_func"] == "count"
+    assert "injected aggregate_query params" in _decisions(plan)
+
+
+def test_model_supplied_aggregate_params_are_not_clobbered(monkeypatch):
+    _enable(monkeypatch)
+    _stub_llm(monkeypatch, _threshold_plan({"threshold": 3, "agg_func": "sum"}))
+    plan = plan_query(_intent("threshold_query", filters=Filters(min_txn_count=10)))
+
+    params = next(s.params for s in plan.steps if s.tool == "aggregate_query")
+    assert params["threshold"] == 3, "an explicit model choice must win over injection"
+    assert params["agg_func"] == "sum"
+
+
+def test_no_threshold_in_query_means_none_injected(monkeypatch):
+    """Nothing to inject is not an error — the tool's own default applies."""
+    _enable(monkeypatch)
+    _stub_llm(monkeypatch, _threshold_plan())
+    plan = plan_query(_intent("threshold_query", filters=Filters()))
+
+    params = next(s.params for s in plan.steps if s.tool == "aggregate_query")
+    assert "threshold" not in params
+    assert params["group_by"] == ["sender_id"]
+
+
+@pytest.mark.parametrize("params,expected", [
+    ({"source": "ibm"}, "source 'ibm' is not available to a plan"),
+    ({"source": "ibm_stratified"}, "source 'ibm_stratified' is not available to a plan"),
+    ({"force_rebuild": True}, "may not set 'force_rebuild'"),
+    ({"nrows": 100}, "may not set 'nrows'"),
+    ({"seed": 7}, "may not set 'seed'"),
+    ({"target_size": 1000}, "may not set 'target_size'"),
+    ({"max_pos_customers": 5}, "may not set 'max_pos_customers'"),
+])
+def test_load_data_capabilities_a_plan_may_not_reach(monkeypatch, params, expected):
+    """A model-triggered dataset switch or parquet rebuild is a filesystem
+    write on the model's say-so. V10 checked only that these names exist."""
+    _enable(monkeypatch)
+    _stub_llm(monkeypatch, {"steps": [
+        {"tool": "load_data", "params": params, "reason": "load"},
+        {"tool": "feature_engineer", "params": {}, "reason": "features"},
+        {"tool": "rule_detect", "params": {}, "reason": "detect"},
+        {"tool": "risk_classify", "params": {}, "reason": "score"},
+    ]})
+    plan = plan_query(_intent("ranking"))
+
+    assert "source=deterministic" in _decisions(plan)
+    assert expected in _decisions(plan)
+
+
+@pytest.mark.parametrize("source", ["synthetic", "synthetic_alt"])
+def test_permitted_sources_still_accepted(monkeypatch, source):
+    _enable(monkeypatch)
+    _stub_llm(monkeypatch, {"steps": [
+        {"tool": "load_data", "params": {"source": source}, "reason": "load"},
+        {"tool": "feature_engineer", "params": {}, "reason": "features"},
+        {"tool": "rule_detect", "params": {}, "reason": "detect"},
+        {"tool": "risk_classify", "params": {}, "reason": "score"},
+    ]})
+    plan = plan_query(_intent("ranking"))
+
+    assert "source=llm" in _decisions(plan)
+    assert next(s.params for s in plan.steps if s.tool == "load_data")["source"] == source
+
+
+def test_forbidden_param_survives_the_load_data_repair(monkeypatch):
+    """The repair moves load_data to the front; V14 must still see its params."""
+    _enable(monkeypatch)
+    _stub_llm(monkeypatch, {"steps": [
+        {"tool": "feature_engineer", "params": {}, "reason": "features"},
+        {"tool": "load_data", "params": {"force_rebuild": True}, "reason": "load"},
+        {"tool": "rule_detect", "params": {}, "reason": "detect"},
+        {"tool": "risk_classify", "params": {}, "reason": "score"},
+    ]})
+    plan = plan_query(_intent("ranking"))
+    assert "may not set 'force_rebuild'" in _decisions(plan)
+
+
+# ---------------------------------------------------------------------------
 # V12 — the plan must be able to answer the question
 # ---------------------------------------------------------------------------
 

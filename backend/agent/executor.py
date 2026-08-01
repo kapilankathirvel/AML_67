@@ -16,6 +16,7 @@ from typing import Any
 import numpy as np
 
 from backend.agent import registry
+from backend.agent import replanner
 from backend.agent.narrator import build_flags
 from backend.config import settings
 from backend.schemas import AgentResponse, ExecutionPlan, QueryIntent, ToolCall
@@ -38,6 +39,7 @@ def run_plan(intent: QueryIntent, plan: ExecutionPlan) -> AgentResponse:
 
     steps = list(plan.steps)
     i = 0
+    replans_used = 0
     while i < len(steps):
         step = steps[i]
         fn = tools.get(step.tool)
@@ -106,6 +108,28 @@ def run_plan(intent: QueryIntent, plan: ExecutionPlan) -> AgentResponse:
             if not hits and not already_planned:
                 steps.insert(i + 1, ToolCall(tool="ml_detect", reason="no rule hits — widening to ML anomaly detection"))
                 plan.decisions.append("no rule hits — widening the net with ml_detect")
+
+        # Observe -> decide -> act. Runs AFTER the three rules above, which
+        # remain the floor: if the model declines or proposes something
+        # illegal, behaviour is exactly what it was before this existed.
+        # Placed here so the model sees the result of the step that just ran,
+        # including any adjustment those rules just made.
+        if (
+            settings.aml_llm_replanner
+            and replans_used < replanner.MAX_REPLANS
+            and i + 1 < len(steps)
+        ):
+            revised = replanner.replan(
+                intent=intent,
+                plan=plan,
+                ctx=ctx,
+                executed=steps[: i + 1],
+                remaining=steps[i + 1:],
+                tools=tools,
+            )
+            replans_used += 1
+            if revised is not None:
+                steps[i + 1:] = revised
 
         i += 1
 

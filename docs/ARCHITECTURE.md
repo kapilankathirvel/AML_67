@@ -151,9 +151,35 @@ all still the model's call.
 
 A legal, answerable but clumsy plan still passes, and should. Judging elegance is not a whitelist's job.
 
+**Authority, not just validity (V14).** Some capabilities are not the model's to invoke at any value.
+`load_data` may not be pointed at `ibm`/`ibm_stratified`, and `force_rebuild`/`nrows`/`seed`/`target_size`/
+`max_pos_customers` are refused outright — `force_rebuild` rewrites the on-disk parquet cache, and a
+model-triggered filesystem write is the wrong side of the line in a compliance system. This was a real
+hole: `{"source": "ibm", "force_rebuild": true}` passed every rule up to V13.
+
 **Repair vs rejection.** Defects with exactly one correct fix and no judgement involved are repaired and
 logged, not rejected: a missing or misplaced `load_data`, `filter_data`'s params when left empty,
-`entity_lookup`'s `entity_id`. `load_data` moved into this category after measurement — it was 8 of 13
+`entity_lookup`'s `entity_id`, and `aggregate_query`'s `group_by`/`agg_func`/`threshold`. That last one
+was the other hole — `aggregate_query` defaults `threshold` to `None`, so an LLM plan for *"customers with
+10+ transactions"* ran with no threshold and returned every sender.
+
+### 2c. Re-planner (`backend/agent/replanner.py`, opt-in)
+
+The loop. With `AML_LLM_REPLANNER=1`, after each executed step the model receives a digest of what
+happened (`observe()`: row count, rule hits by rule, ML percentiles above the floor, risk rows by band)
+and may replace the steps that have not run yet.
+
+`ToolContext.artifacts` was always the observation channel — threaded through every step by the executor
+and, before this module, read by nothing except three `if` statements. `ExecutionPlan.decisions` was
+always the audit channel. Neither frozen file needed changing.
+
+The revision is validated as `executed_prefix + proposed_suffix` through the same `validate_proposal`, so
+every rule applies mid-flight for free and V3 prevents re-running a completed step. Capped at
+`MAX_REPLANS = 2`; the executor's three hardcoded rules remain the floor beneath it.
+
+The observation digest must contain the changing counters — `backend/llm/client.py` caches on the exact
+prompt, so a static digest would make iteration 2 replay iteration 1 and loop on the same decision
+forever. `tests/test_replanner.py` pins that the digest changes as a run progresses. `load_data` moved into this category after measurement — it was 8 of 13
 rejections, yet all eight deterministic branches start with it and no query exists where omitting it is
 correct, so requiring the model to emit it tested nothing. Anything involving a real choice is never
 repaired; a duplicated `load_data` is still rejected, because two of them signals confusion rather than an

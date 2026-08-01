@@ -159,8 +159,26 @@ planner present or absent.
 
 #### Measured: how often does a real model produce a usable plan?
 
-15 queries spanning all 7 intents, against a local `qwen2.5:3b-instruct`. Intents were constructed
-deterministically so this measures the planner, not the intent parser. **27%.**
+Regenerate with `python -m evaluation.measure_planner --provider groq`. 15 queries spanning all 7
+intents; intents are constructed deterministically so this measures the planner, not the intent parser.
+
+| Model | Usable plans |
+|---|---|
+| Local `qwen2.5:3b-instruct` | 27% (4/15) |
+| Hosted (Groq) | **93% (14/15)** |
+
+**That gap is the answer to "is the design sound, or is the model just small?"** — it was the model. The
+same validator, the same prompt, the same 15 queries: a hosted model produces a usable plan almost every
+time. **11 of the 14 accepted plans differ from what the deterministic planner would have emitted**, so it
+is genuinely planning rather than reproducing the routing table.
+
+The single hosted failure is instructive rather than alarming: it put `date_from`/`date_to` on
+`load_data` instead of `filter_data` — a plausible mistake that V10 caught before anything ran.
+
+The 3B result is kept because it is the more interesting engineering story. Getting from 20% to 27% on it
+is what produced V12, V13 and the `load_data` repair — every one of those rules was written because a
+weak model found a hole a strong one never exercises. **A weak model is a better validator test than a
+strong one.**
 
 | Stage | Accepted by validator | Plans that can actually answer |
 |---|---|---|
@@ -213,9 +231,44 @@ Two limits on that number, both worth knowing before quoting it:
   `pattern_types: ["risk"]` that motivated V13. Measuring the planner in isolation and measuring it in
   situ are different measurements, and only the first one is automated here.
 
-**The part that did hold: across ~60 real proposals, zero bad plans reached the executor.** Every
+**The part that did hold: across ~75 real proposals, zero bad plans reached the executor.** Every
 truncated, dependency-violating and malformed proposal was caught. Proposal quality is bounded by the
 model; the safety property is not.
+
+### Mid-run re-planning: the observe → decide → act loop
+
+Everything above happens *before* any data is loaded. `AML_LLM_REPLANNER=1` closes that gap: after each
+step the model is shown a digest of what actually happened — row counts, how many rule hits and across
+which rules, ML percentile spread, risk rows by band — and may revise **the steps that have not run yet**.
+
+`ctx.artifacts` has carried those observations since the project began; until `backend/agent/replanner.py`
+existed, nothing read them into a prompt. That was the concrete sense in which this was a planner rather
+than an agent.
+
+Three properties make it safe to turn on:
+
+- **It cannot rewrite history.** The revision is validated as `executed_prefix + proposed_suffix` through
+  the *same* `validate_proposal`, so V3 (no duplicates) stops a re-run of `load_data`, V12 still requires
+  the terminal tool, and V14 still forbids the capabilities a plan may not reach. One rule set, no second
+  implementation to drift.
+- **The three hardcoded runtime rules stay underneath it**, exactly as `build_plan` sits under
+  `plan_query`. Model declines or proposes something illegal → behaviour is what it was before.
+- **It is capped at 2 interventions per request** and defaults off.
+
+**Measured, and the result is a negative one worth reporting.** Five queries through the full pipeline
+with a hosted model, loop on versus off: it produced decisions on 5/5 queries and **declined to revise on
+every single one**. The outcome differed on 0/5.
+
+That is the correct behaviour rather than a failure. The same model plans well enough up front (93%) that
+by the time it sees the observation there is nothing to fix — a re-planner earns its keep when the initial
+plan is wrong or the data surprises it, and neither happened here. It would be easy to manufacture a
+scenario where it fires; the honest report is that on realistic queries with a good planner, it correctly
+does nothing.
+
+One caveat on the latency figure: the comparison ran loop-off first, which warmed
+`backend/llm/client.py`'s prompt cache, so the loop-on pass got its *planning* calls for free. The
+measured `+0.2s` therefore understates the true cost — budget roughly one extra round trip per
+intervention.
 
 Full intent → tool mapping table: **[docs/CONTRACTS.md](docs/CONTRACTS.md) Contract 4**.
 

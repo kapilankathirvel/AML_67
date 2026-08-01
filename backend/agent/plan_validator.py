@@ -19,7 +19,12 @@ a plan that passes cannot fail on a missing artifact.
 V12 and V13 enforce *answerability*: the plan must contain the tool that
 produces the response its intent promises (V12), and any parameter drawn from a
 closed set must actually be in it (V13). Both were added after a plan passed
-every other rule and still returned nothing. This was not in the original design, which held
+every other rule and still returned nothing.
+
+V14 enforces *authority*: some capabilities are not the model's to invoke at
+any value. That is a stronger claim than validating a value, and it is the one
+that belongs in a compliance system — a plan may choose how to analyse, but it
+may not choose which dataset the product runs on or write to disk. This was not in the original design, which held
 that anything beyond dependency legality would mean encoding the deterministic
 planner's opinions back into the validator. Measuring showed that reasoning was
 too permissive. With V0-V11 alone a local model hit 60% acceptance while only 1
@@ -130,6 +135,42 @@ _ENUM_PARAMS: dict[str, frozenset[str]] = {
     # frozen contract spells it patterns, with pattern_types as an alias.
     "pattern_types": _PATTERN_VALUES,
     "patterns": _PATTERN_VALUES,
+}
+
+# V14 — capabilities that are not the model's to invoke.
+#
+# V13 says "a parameter whose legal values are knowable must be checked, not
+# merely named". V14 is the stronger neighbouring claim: some parameters must
+# not be reachable from an LLM plan at all, whatever value is offered.
+#
+# load_data is the case that forced it. It declares `source` and
+# `force_rebuild` (backend/tools/data_loader.py), V10 checks only that those
+# names exist, and _normalise never touches load_data — so a proposal of
+# {"source": "ibm", "force_rebuild": true} was fully legal. That would switch
+# the product onto a different dataset mid-request AND trigger a parquet cache
+# rebuild, which is a filesystem write, on a model's say-so. In a system whose
+# whole claim is that the validator makes LLM tool-selection safe, a
+# model-triggered disk write is the wrong side of the line.
+#
+# 'ibm'/'ibm_stratified' are additionally blocked for a plain correctness
+# reason: they read data/raw/, which is empty in this repo, so a plan choosing
+# them fails at runtime anyway. Rejecting turns a confusing mid-run error into
+# a clear, logged refusal.
+_ALLOWED_SOURCES: frozenset[str] = frozenset({"synthetic", "synthetic_alt"})
+
+# Params an LLM plan may not set at any value. Each maps to why, so the
+# rejection message explains rather than just refuses.
+_FORBIDDEN_PARAMS: dict[tuple[str, str], str] = {
+    ("load_data", "force_rebuild"):
+        "it rewrites the on-disk parquet cache — a model must not trigger a filesystem write",
+    ("load_data", "nrows"):
+        "it is an 'ibm'-source testing knob and has no meaning for the sources a plan may use",
+    ("load_data", "target_size"):
+        "it only affects 'ibm_stratified', which a plan may not select",
+    ("load_data", "max_pos_customers"):
+        "it only affects 'ibm_stratified', which a plan may not select",
+    ("load_data", "seed"):
+        "it only affects 'ibm_stratified' sampling, which a plan may not select",
 }
 
 _REQUIRED_TERMINAL: dict[str, str] = {
@@ -341,6 +382,21 @@ def validate_proposal(
                         f"expected one of {sorted(allowed_values)}"
                     )
 
+    # V14 — capabilities a plan may not reach at all
+    for step in steps:
+        for key in sorted(step["params"]):
+            why = _FORBIDDEN_PARAMS.get((step["tool"], key))
+            if why is not None:
+                rejections.append(f"{step['tool']}: may not set '{key}' — {why}")
+
+        if step["tool"] == "load_data" and "source" in step["params"]:
+            source = step["params"]["source"]
+            if source not in _ALLOWED_SOURCES:
+                rejections.append(
+                    f"load_data: source '{source}' is not available to a plan — "
+                    f"expected one of {sorted(_ALLOWED_SOURCES)}"
+                )
+
     if rejections:
         return ValidationResult(ok=False, rejections=rejections, notes=notes)
 
@@ -389,6 +445,32 @@ def _normalise(steps: list[dict], intent: QueryIntent) -> tuple[list[ToolCall], 
         if step["tool"] == "entity_lookup" and "entity_id" not in params:
             params["entity_id"] = intent.entities[0] if intent.entities else None
             notes.append("injected entity_lookup entity_id from the parsed query")
+
+        if step["tool"] == "aggregate_query":
+            # backend/agent/planner.py always passes group_by/agg_func/threshold
+            # for a threshold_query; nothing was passing them into an LLM plan.
+            # `threshold` is the one that silently produces a WRONG ANSWER
+            # rather than an obviously broken one: aggregate_query's signature
+            # defaults it to None, so "which customers made 10+ transactions?"
+            # ran the aggregation with no threshold at all and returned every
+            # sender. Same failure shape as pattern_types=["risk"] — a legal
+            # plan that quietly answers a different question.
+            injected = []
+            for key, value in (
+                ("group_by", ["sender_id"]),
+                ("agg_func", "count"),
+                ("threshold", intent.filters.min_txn_count),
+            ):
+                if value is None:
+                    continue
+                if key not in params:
+                    params[key] = value
+                    injected.append(key)
+            if injected:
+                notes.append(
+                    "injected aggregate_query params from the parsed query: "
+                    + ", ".join(sorted(injected))
+                )
 
         calls.append(ToolCall(tool=step["tool"], params=params, reason=step["reason"]))
 

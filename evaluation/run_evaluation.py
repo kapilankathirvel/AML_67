@@ -38,6 +38,12 @@ tests/test_integration.py, which had to solve the same problem:
      Pinned explicitly rather than left to the module default, so the guarantee
      is stated in the code that depends on it.
 
+  5. Mid-run re-planning — settings.aml_llm_replanner is pinned off too. Unlike
+     (4) this one is NOT unreachable by construction: the re-planner lives
+     inside executor.run_plan, which this harness does call. Without this pin a
+     stray environment variable would silently make every published metric
+     depend on a model's mid-flight decisions.
+
 ML seeding is already fixed (random_state=42 in ml_detect.py), so with the
 above the run reproduces byte-for-byte.
 """
@@ -111,9 +117,11 @@ def run_agent_flags(source: str = "synthetic") -> tuple[set[str], set[str], dict
     original_complete_json = narrator_mod.complete_json
     narrator_mod.complete_json = lambda *args, **kwargs: None
 
-    # (4) deterministic tool selection
+    # (4) deterministic tool selection, up front and mid-run
     original_llm_planner = settings.aml_llm_planner
+    original_llm_replanner = settings.aml_llm_replanner
     settings.aml_llm_planner = False
+    settings.aml_llm_replanner = False
 
     try:
         # (2) construct the intent directly — never call the LLM parser
@@ -131,6 +139,7 @@ def run_agent_flags(source: str = "synthetic") -> tuple[set[str], set[str], dict
     finally:
         narrator_mod.complete_json = original_complete_json
         settings.aml_llm_planner = original_llm_planner
+        settings.aml_llm_replanner = original_llm_replanner
         executor_mod._TOOLS_CACHE = None
 
     any_flag = {f.entity_id for f in response.flags}

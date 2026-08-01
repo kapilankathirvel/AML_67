@@ -42,5 +42,17 @@ class Settings(BaseSettings):
     # reproducible without depending on anyone remembering to stub it.
     aml_llm_planner: bool = False
 
+    # Let the model revise the REMAINING steps mid-run after observing what the
+    # steps so far produced (backend/agent/replanner.py). This is the
+    # observe -> decide -> act loop; without it the model commits to a plan
+    # before any data is loaded.
+    #
+    # Off by default for the same reason as aml_llm_planner — no
+    # tests/conftest.py means a default of on would let the suite issue real
+    # network calls — and for one more: each re-plan is an extra LLM round trip
+    # inside the request, and live queries already approach the frontend's 60s
+    # timeout.
+    aml_llm_replanner: bool = False
+
 
 settings = Settings()
