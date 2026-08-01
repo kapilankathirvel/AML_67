@@ -157,6 +157,42 @@ Off by default also means every published metric is produced by the deterministi
 `evaluation/run_evaluation.py` pins the flag explicitly, and the results are byte-identical with the LLM
 planner present or absent.
 
+#### Measured: how often does a real model produce a usable plan?
+
+15 queries spanning all 7 intents, against a local `qwen2.5:3b-instruct`. Intents were constructed
+deterministically so this measures the planner, not the intent parser. **27%.**
+
+| Stage | Accepted by validator | Plans that can actually answer |
+|---|---|---|
+| Validator as first written | 20% | 7% |
+| + `pattern_types` alias, + constraints moved into the schema hint | **60%** | 7% |
+| + V12 (answerability) | 13% | 13% |
+| + `load_data` auto-repair | **27%** | **27%** |
+
+Two things this exposed that the design did not anticipate, both worth more than the final number:
+
+**A rising acceptance rate was hiding a falling one.** At 60% accepted, only 1 plan in 15 was useful. The
+model had learned that *shorter plans pass* — a truncated plan satisfies every ordering rule vacuously, so
+`"who are my riskiest customers?"` came back as `load_data → filter_data → feature_engineer`: legal,
+computes features, detects nothing, returns zero flags. V12 requires each intent's terminal tool
+(`risk_classify`, `eda_profile` or `aggregate_query`) to be present, which dropped acceptance to 13% and
+made the two numbers identical. Lower and honest beats higher and wrong.
+
+**Over half the rejections were ceremony, not bad planning.** The single biggest failure was omitting
+`load_data` — 8 of 13 rejections. But `load_data` is not a planning decision: all eight deterministic
+branches begin with it and no query exists where skipping it is right, so requiring the model to emit it
+tested nothing and cost half the acceptance rate. It is now repaired and logged rather than rejected. The
+line held elsewhere: nothing that involves a real choice — which detectors run, which patterns to test —
+is ever repaired, or "the LLM chose this plan" would stop being true.
+
+What remains is model capacity, not prompt wording. The prompt names the required tool for that specific
+query, and a 3B model still returned a one-step plan for *"what does this dataset look like?"*.
+`full_analysis` scores 2/2; `eda`, `entity_investigation` and `threshold_query` score 0.
+
+**The part that did hold: across ~60 real proposals, zero bad plans reached the executor.** Every
+truncated, dependency-violating and malformed proposal was caught. Proposal quality is bounded by the
+model; the safety property is not.
+
 Full intent → tool mapping table: **[docs/CONTRACTS.md](docs/CONTRACTS.md) Contract 4**.
 
 ## Architecture

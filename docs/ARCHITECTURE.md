@@ -136,11 +136,28 @@ unparseable JSON, any validation rejection — returns `build_plan(intent)`. Con
 LLM can only do *better* than it for a given query, never something illegal. Contract 4 is unchanged and
 was not edited for this feature.
 
-**Validation is about legality, not quality.** V5–V7 mirror real preconditions in the tool bodies
-(`rules.py` reads `ctx.artifacts["features"]`; `risk.py` reads `rule_hits`/`ml_scores`), so a passing plan
-cannot fail on a missing artifact. A plan that is legal but poorly chosen still runs — the trace records
-what was picked and why. Encoding the deterministic planner's *opinions* into the validator would defeat
-the point of asking a model at all.
+**Legality (V0–V11) and answerability (V12) are different things.** V5–V7 mirror real preconditions in the
+tool bodies (`rules.py` reads `ctx.artifacts["features"]`; `risk.py` reads `rule_hits`/`ml_scores`), so a
+passing plan cannot fail on a missing artifact. V12 additionally requires the terminal tool each intent
+needs to produce its answer.
+
+V12 was not in the original design, which held that anything beyond dependency legality would mean
+encoding the deterministic planner's opinions back into the validator. Measurement showed that was too
+permissive: with V0–V11 alone a local 3B model reached **60% acceptance while only 7% of plans could
+answer the query** — it had learned that shorter plans pass, because a truncated plan satisfies every
+ordering rule vacuously. V12 constrains the plan's *output*, not the route to it: a `ranking` query that
+cannot return a ranking is broken, not merely suboptimal. Which filters, which detectors, rules vs ML —
+all still the model's call.
+
+A legal, answerable but clumsy plan still passes, and should. Judging elegance is not a whitelist's job.
+
+**Repair vs rejection.** Defects with exactly one correct fix and no judgement involved are repaired and
+logged, not rejected: a missing or misplaced `load_data`, `filter_data`'s params when left empty,
+`entity_lookup`'s `entity_id`. `load_data` moved into this category after measurement — it was 8 of 13
+rejections, yet all eight deterministic branches start with it and no query exists where omitting it is
+correct, so requiring the model to emit it tested nothing. Anything involving a real choice is never
+repaired; a duplicated `load_data` is still rejected, because two of them signals confusion rather than an
+omitted preamble.
 
 The audit trail (`planner: source=` / `proposed =` / `rejected —` / `executed =`) goes into
 `plan.decisions[]`, which the UI already renders, so this needed no frontend change. `executed` is

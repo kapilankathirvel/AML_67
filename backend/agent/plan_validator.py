@@ -8,18 +8,45 @@ not. Nothing an LLM returns reaches the executor unchecked.
 
 What it validates and what it deliberately does not
 ---------------------------------------------------
-It enforces *safety and dependency legality*, not plan quality. V5-V7 mirror
-real preconditions in the tool bodies — backend/tools/rules.py reads
+Two kinds of rule, and the boundary between them was drawn by measurement
+rather than by taste.
+
+V0-V11 enforce *safety and dependency legality*. V5-V7 mirror real
+preconditions in the tool bodies — backend/tools/rules.py reads
 ctx.artifacts["features"], backend/tools/risk.py reads rule_hits/ml_scores — so
-a plan that passes cannot fail on a missing artifact. A plan that is legal but
-poorly chosen (profiling the dataset for a single-entity query, say) still
-passes; it runs, and the trace records what was chosen and why. Judging whether
-a legal plan was a *good* plan is not something a whitelist can do, and
-pretending otherwise would mean encoding the deterministic planner's opinions
-back into the validator, which would defeat the point of asking a model.
+a plan that passes cannot fail on a missing artifact.
+
+V12 enforces *answerability*: the plan must contain the tool that produces the
+response its intent promises. This was not in the original design, which held
+that anything beyond dependency legality would mean encoding the deterministic
+planner's opinions back into the validator. Measuring showed that reasoning was
+too permissive. With V0-V11 alone a local model hit 60% acceptance while only 1
+plan in 15 was useful: it had learned that shorter plans pass, and a truncated
+plan satisfies every ordering rule vacuously. "Who are my riskiest customers?"
+produced load_data -> filter_data -> feature_engineer — legal, and it returns
+nothing.
+
+The distinction that makes V12 legitimate rather than a taste rule: it
+constrains the plan's OUTPUT, not the route to it. A ranking query that cannot
+return a ranking is broken, not suboptimal. Everything upstream stays the
+model's call — which filters, rules or ML or both, whether to profile first.
+
+What still passes and should: a legal, answerable, but clumsy plan (profiling
+the dataset before a single-entity lookup, say). The trace records what was
+chosen and why; judging elegance is not a whitelist's job.
 
 All violations are collected rather than short-circuiting on the first, so the
 audit trail states everything wrong with a rejected proposal.
+
+Repair vs rejection
+-------------------
+Some defects have exactly one correct fix and no judgement in applying it:
+a missing load_data (every plan needs it), filter_data's params when the model
+left them empty (they come from the parsed query), entity_lookup's entity_id.
+Those are repaired and logged rather than rejected — see
+_ensure_load_data_first and _normalise. Anything involving a real choice —
+which detectors run, which patterns to test — is never repaired, because
+silently rewriting those would make "the LLM chose this plan" untrue.
 
 The V10 exemption is load-bearing
 ---------------------------------
@@ -54,6 +81,32 @@ _REQUIRES_BEFORE: dict[str, tuple[str, ...]] = {
 
 # risk_classify needs at least one of these, not all of them.
 _RISK_CLASSIFY_ANY_OF = ("rule_detect", "ml_detect")
+
+# V12 — the terminal output each intent promises in its response.
+#
+# This is the one rule here that is about the plan DOING ITS JOB rather than
+# about dependency legality, and it was added after measuring: with V0-V11
+# alone, a local model reached 60% acceptance while only 1 in 15 plans was
+# actually useful. It had learned to emit SHORT plans, and a truncated plan
+# satisfies every ordering rule trivially — "who are my riskiest customers?"
+# came back as load_data -> filter_data -> feature_engineer, which is legal,
+# computes features, detects nothing, and returns zero flags.
+#
+# The line this draws is deliberately narrow: a plan must be able to produce
+# the response shape its intent promises. That is not a matter of taste, which
+# is why it belongs here — a ranking query that can return no ranking is
+# broken, not merely suboptimal. Everything upstream of the terminal tool is
+# still the model's choice: which filters, whether to use rules or ML or both,
+# whether to profile first. This constrains the output, not the route to it.
+_REQUIRED_TERMINAL: dict[str, str] = {
+    "full_analysis": "risk_classify",
+    "pattern_search": "risk_classify",
+    "entity_investigation": "risk_classify",
+    "ranking": "risk_classify",
+    "explain_flag": "risk_classify",
+    "eda": "eda_profile",
+    "threshold_query": "aggregate_query",
+}
 
 
 @dataclass
@@ -98,6 +151,51 @@ def _coerce_steps(raw: Any, rejections: list[str]) -> list[dict] | None:
     return clean
 
 
+def _ensure_load_data_first(steps: list[dict]) -> tuple[list[dict], str]:
+    """Put load_data at the front, prepending it if the model left it out.
+
+    Repair rather than rejection, and the reasoning is worth stating because it
+    is the one place this module bends.
+
+    load_data is not a planning decision. All eight branches of the
+    deterministic planner start with it, every legal plan requires it, and no
+    query exists for which omitting it is correct — so it carries zero
+    information about how the model chose to answer the question. There is
+    exactly one right fix and no judgement in applying it, which puts it in the
+    same class as injecting filter_data's params from the parsed query.
+
+    Measured cost of treating it as a rejection instead: against a local
+    qwen2.5:3b-instruct it was 8 of 13 rejections — the model kept opening with
+    filter_data — so more than half the failures were ceremony rather than bad
+    planning.
+
+    The line this does NOT cross: nothing here adds or removes a *detector*, or
+    decides which patterns to test. Those are the choices being delegated, and
+    repairing them would make "the LLM chose the plan" untrue. A duplicated
+    load_data is still a rejection (V3), because two of them means the model
+    misunderstood the plan rather than merely omitted a preamble.
+    """
+    names = [s["tool"] for s in steps]
+    if names.count("load_data") > 1:
+        return steps, ""  # V3 will reject; repairing would hide the confusion
+    if names and names[0] == "load_data":
+        return steps, ""
+
+    if "load_data" in names:
+        idx = names.index("load_data")
+        moved = steps.pop(idx)
+        return [moved] + steps, (
+            f"moved load_data from position {idx + 1} to the front "
+            "(every plan must start by loading the data)"
+        )
+
+    return [{
+        "tool": "load_data",
+        "params": {},
+        "reason": "load the working dataset (required first step of every plan)",
+    }] + steps, "prepended load_data (omitted by the planner; every plan requires it)"
+
+
 def validate_proposal(
     raw: Any,
     intent: QueryIntent,
@@ -117,6 +215,10 @@ def validate_proposal(
     if steps is None:
         return ValidationResult(ok=False, rejections=rejections)
 
+    steps, load_note = _ensure_load_data_first(steps)
+    if load_note:
+        notes.append(load_note)
+
     names = [s["tool"] for s in steps]
     declared = declared_params(tools)
 
@@ -134,7 +236,9 @@ def validate_proposal(
         if names.count(name) > 1:
             rejections.append(f"tool '{name}' proposed more than once")
 
-    # V4 — load_data first
+    # V4 — load_data first. Normally already true: _ensure_load_data_first
+    # repairs it above. This remains as a backstop for the one case that is not
+    # repaired (a duplicated load_data, which V3 also flags).
     if names[0] != "load_data":
         rejections.append(f"load_data must be the first step, got '{names[0]}'")
 
@@ -180,6 +284,14 @@ def validate_proposal(
     for step in steps:
         if not step["reason"]:
             rejections.append(f"{step['tool']}: missing reason")
+
+    # V12 — the plan must be able to answer the question that was asked
+    required = _REQUIRED_TERMINAL.get(intent.intent)
+    if required and required not in names:
+        rejections.append(
+            f"intent '{intent.intent}' needs {required} to produce a result, "
+            f"but the plan ends at '{names[-1]}'"
+        )
 
     if rejections:
         return ValidationResult(ok=False, rejections=rejections, notes=notes)

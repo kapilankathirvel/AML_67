@@ -41,16 +41,25 @@ from __future__ import annotations
 import uuid
 from typing import Any, Callable
 
-from backend.agent.plan_validator import validate_proposal
+from backend.agent.plan_validator import _REQUIRED_TERMINAL, validate_proposal
 from backend.agent.planner import build_plan
 from backend.agent.tool_schema import render_catalog
 from backend.config import settings
 from backend.llm.client import complete_json
 from backend.schemas import ExecutionPlan, QueryIntent
 
+# The two hardest rules are repeated here rather than left to the prompt body.
+# Measured reason: against a local qwen2.5:3b-instruct, 10 of 15 proposals
+# omitted load_data as the first step and 10 of 15 left `reason` empty, while 0
+# of 15 produced unparseable JSON. The model reliably honours the *schema* and
+# unreliably honours prose further up the prompt, so the constraints that were
+# being dropped belong in the schema line.
 _SCHEMA_HINT = (
     'Return JSON: {"steps": [{"tool": "<tool name>", "params": {}, '
-    '"reason": "<one sentence on why this tool is needed for THIS query>"}]}'
+    '"reason": "<one sentence on why this tool is needed for THIS query>"}]}. '
+    'The FIRST step must always be {"tool": "load_data", ...}. '
+    'Every step must include a non-empty "reason". '
+    'Never emit a step without both "tool" and "reason".'
 )
 
 # Stated in the prompt AND enforced in plan_validator. The prompt raises the
@@ -58,13 +67,28 @@ _SCHEMA_HINT = (
 # other — a model that ignores the prompt is exactly the case the validator
 # exists for.
 _DEPENDENCY_RULES = """\
-- load_data must be the first step, and appear exactly once
+- load_data MUST be the first step, always, and appear exactly once
+- every step MUST carry a non-empty "reason"
 - feature_engineer must come before rule_detect and before ml_detect
 - risk_classify must come after rule_detect or ml_detect
 - filter_data must come after load_data
 - entity_lookup only if the query names a specific customer
 - no tool may appear more than once; at most 12 steps
 - only use parameter names listed under that tool above"""
+
+# A worked example. Small models pattern-match a concrete example far more
+# reliably than they follow a list of constraints — and it demonstrates the
+# two rules that were being dropped (load_data first, reason on every step)
+# rather than only asserting them.
+_EXAMPLE = """\
+EXAMPLE — for the query "which customers are structuring under $10,000?":
+{"steps": [
+  {"tool": "load_data", "params": {}, "reason": "the query needs the transaction set"},
+  {"tool": "filter_data", "params": {"amount_max": 10000}, "reason": "restrict to the amount band asked about"},
+  {"tool": "feature_engineer", "params": {"pattern_types": ["structuring"]}, "reason": "structuring features are needed by the rules"},
+  {"tool": "rule_detect", "params": {"patterns": ["structuring"]}, "reason": "apply the structuring detectors"},
+  {"tool": "risk_classify", "params": {}, "reason": "turn the rule hits into ranked risk scores"}
+]}"""
 
 
 def _describe_intent(intent: QueryIntent) -> str:
@@ -86,16 +110,30 @@ def _describe_intent(intent: QueryIntent) -> str:
 
 
 def _build_prompt(intent: QueryIntent, tools: dict[str, Callable]) -> str:
+    # State THIS query's required terminal tool explicitly rather than leaving
+    # the model to infer it from a general rule. Measured: a general "detection
+    # queries must end with risk_classify" line did not stop the model
+    # truncating plans, because it has to first decide its query is a detection
+    # query. Naming the tool removes that inference step.
+    required = _REQUIRED_TERMINAL.get(intent.intent)
+    requirement = (
+        f"\nThis query's intent is '{intent.intent}', so the plan MUST include "
+        f"{required} — without it the plan returns nothing and is rejected.\n"
+        if required else ""
+    )
     return (
         "You are planning tool calls for an AML compliance query.\n\n"
         f"QUERY: {intent.raw_query}\n"
-        f"PARSED INTENT: {_describe_intent(intent)}\n\n"
+        f"PARSED INTENT: {_describe_intent(intent)}\n"
+        f"{requirement}\n"
         "AVAILABLE TOOLS:\n"
         f"{render_catalog(tools)}\n\n"
         "DEPENDENCY RULES YOU MUST OBEY:\n"
         f"{_DEPENDENCY_RULES}\n\n"
-        "Choose only the tools this specific query needs. Do not include a tool "
-        "whose output would not be used to answer it."
+        f"{_EXAMPLE}\n\n"
+        "Choose only the tools this specific query needs, but never at the cost "
+        "of the required tool above. Do not include a tool whose output would "
+        "not be used to answer the query."
     )
 
 

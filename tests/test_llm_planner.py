@@ -160,8 +160,11 @@ def test_llm_unavailable_falls_back_and_says_so(monkeypatch):
     ({"steps": [{"tool": "load_data", "params": {}, "reason": "r"},
                 {"tool": "risk_classify", "params": {}, "reason": "r"}]},
      "risk_classify requires rule_detect or ml_detect before it"),
+    # A plan that cannot answer its intent. Note load_data is NOT the failure
+    # here any more — it gets prepended (see the repair tests below) — so what
+    # remains is that a pattern_search plan produces no risk scores.
     ({"steps": [{"tool": "eda_profile", "params": {}, "reason": "r"}]},
-     "load_data must be the first step"),
+     "needs risk_classify to produce a result"),
     ({"steps": [{"tool": "load_data", "params": {}, "reason": "r"},
                 {"tool": "eda_profile", "params": {}, "reason": "r"},
                 {"tool": "eda_profile", "params": {}, "reason": "r"}]},
@@ -221,9 +224,9 @@ def test_all_violations_are_reported_not_just_the_first(monkeypatch):
         {"tool": "ghost", "params": {}, "reason": "r"},
     ]})
     text = _decisions(plan_query(_intent()))
-    assert "load_data must be the first step" in text
     assert "unknown tool 'ghost'" in text
     assert "missing reason" in text
+    assert "risk_classify requires rule_detect or ml_detect before it" in text
 
 
 # ---------------------------------------------------------------------------
@@ -298,11 +301,104 @@ def test_entity_id_key_is_always_present(monkeypatch):
     _stub_llm(monkeypatch, {"steps": [
         {"tool": "load_data", "params": {}, "reason": "r"},
         {"tool": "entity_lookup", "params": {}, "reason": "r"},
+        {"tool": "feature_engineer", "params": {}, "reason": "r"},
+        {"tool": "rule_detect", "params": {}, "reason": "r"},
+        {"tool": "risk_classify", "params": {}, "reason": "r"},
     ]})
-    plan = plan_query(_intent(entities=["C-04521"]))
+    plan = plan_query(_intent("entity_investigation", entities=["C-04521"]))
     params = next(s.params for s in plan.steps if s.tool == "entity_lookup")
     assert "entity_id" in params
     assert params["entity_id"] == "C-04521"
+
+
+# ---------------------------------------------------------------------------
+# load_data repair — omitted or misplaced load_data is fixed, not rejected
+# ---------------------------------------------------------------------------
+
+
+def test_missing_load_data_is_prepended_not_rejected(monkeypatch):
+    """load_data carries no planning information — every legal plan starts with
+    it — so requiring the model to emit it only adds a failure mode. Measured:
+    it was 8 of 13 rejections against a local 3B model."""
+    _enable(monkeypatch)
+    _stub_llm(monkeypatch, {"steps": [
+        {"tool": "feature_engineer", "params": {}, "reason": "features"},
+        {"tool": "rule_detect", "params": {}, "reason": "detect"},
+        {"tool": "risk_classify", "params": {}, "reason": "score"},
+    ]})
+    plan = plan_query(_intent())
+
+    assert "source=llm" in _decisions(plan), "should be accepted, not fall back"
+    assert [s.tool for s in plan.steps][0] == "load_data"
+    assert "prepended load_data" in _decisions(plan), "the repair must be logged"
+
+
+def test_misplaced_load_data_is_moved_to_the_front(monkeypatch):
+    _enable(monkeypatch)
+    _stub_llm(monkeypatch, {"steps": [
+        {"tool": "feature_engineer", "params": {}, "reason": "features"},
+        {"tool": "load_data", "params": {}, "reason": "load"},
+        {"tool": "rule_detect", "params": {}, "reason": "detect"},
+        {"tool": "risk_classify", "params": {}, "reason": "score"},
+    ]})
+    plan = plan_query(_intent())
+
+    assert [s.tool for s in plan.steps][0] == "load_data"
+    assert "moved load_data" in _decisions(plan)
+
+
+def test_duplicate_load_data_is_still_rejected(monkeypatch):
+    """Two of them means the model misunderstood the plan, not that it omitted
+    a preamble — repairing that would hide real confusion."""
+    _enable(monkeypatch)
+    _stub_llm(monkeypatch, {"steps": [
+        {"tool": "load_data", "params": {}, "reason": "load"},
+        {"tool": "load_data", "params": {}, "reason": "load again"},
+        {"tool": "feature_engineer", "params": {}, "reason": "features"},
+        {"tool": "rule_detect", "params": {}, "reason": "detect"},
+        {"tool": "risk_classify", "params": {}, "reason": "score"},
+    ]})
+    plan = plan_query(_intent())
+    assert "source=deterministic" in _decisions(plan)
+    assert "proposed more than once" in _decisions(plan)
+
+
+def test_repair_never_adds_a_detector(monkeypatch):
+    """The line the repair must not cross: it fixes preconditions, never the
+    choices being delegated. A plan with no detectors must still be rejected
+    rather than quietly completed."""
+    _enable(monkeypatch)
+    _stub_llm(monkeypatch, {"steps": [
+        {"tool": "filter_data", "params": {}, "reason": "narrow"},
+    ]})
+    plan = plan_query(_intent())
+
+    assert "source=deterministic" in _decisions(plan)
+    assert "needs risk_classify to produce a result" in _decisions(plan)
+
+
+# ---------------------------------------------------------------------------
+# V12 — the plan must be able to answer the question
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("intent_name,terminal", [
+    ("full_analysis", "risk_classify"),
+    ("pattern_search", "risk_classify"),
+    ("ranking", "risk_classify"),
+    ("eda", "eda_profile"),
+    ("threshold_query", "aggregate_query"),
+])
+def test_truncated_plans_are_rejected_per_intent(monkeypatch, intent_name, terminal):
+    """Before V12 a truncated plan passed every ordering rule vacuously: a
+    local model reached 60% acceptance with only 7% of plans able to answer."""
+    _enable(monkeypatch)
+    _stub_llm(monkeypatch, {"steps": [
+        {"tool": "load_data", "params": {}, "reason": "load"},
+        {"tool": "filter_data", "params": {}, "reason": "narrow"},
+    ]})
+    plan = plan_query(_intent(intent_name, entities=["C-04521"]))
+    assert f"needs {terminal} to produce a result" in _decisions(plan)
 
 
 # ---------------------------------------------------------------------------

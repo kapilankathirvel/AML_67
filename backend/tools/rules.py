@@ -771,8 +771,19 @@ _ALL_RULES = {"R1", "R2", "R3", "R4", "R5", "R6", "R7"}
             "list[str] | None — which AML patterns to test. "
             "Valid: 'structuring', 'smurfing', 'layering', 'rapid_cashout', "
             "'velocity', 'dormant_reactivation', 'unknown'. "
-            "None → run all rules."
+            "None → run all rules. "
+            "Accepts 'pattern_types' as an alias for this same argument."
         ),
+        # Declared so the alias is discoverable and passes plan validation, not
+        # because it is a second argument. feature_engineer and ml_detect both
+        # call this concept `pattern_types` while docs/CONTRACTS.md freezes this
+        # tool's spelling as `patterns` — one idea, two names across three
+        # tools. Measured cost: a local model proposing plans used
+        # `pattern_types` here in 5 of 15 attempts, every one of which the plan
+        # validator correctly rejected as an undeclared param. Accepting the
+        # alias removes a trap that a human integrator would fall into just as
+        # easily, without renaming the frozen contract's parameter.
+        "pattern_types": "list[str] | None — alias for `patterns`; identical meaning.",
     },
     description=(
         "Apply rule-based AML detectors R1-R7 (per AML_LOGIC.md) to the working set. "
@@ -783,6 +794,7 @@ _ALL_RULES = {"R1", "R2", "R3", "R4", "R5", "R6", "R7"}
 def rule_detect(
     ctx: ToolContext,
     patterns: Optional[list[str]] = None,
+    pattern_types: Optional[list[str]] = None,
     **kw,
 ) -> ToolResult:
     """Run rule-based AML detectors R1-R7.
@@ -793,7 +805,17 @@ def rule_detect(
     R7 is the only receiver-side rule: it emits hits keyed on receiver_id, so
     it can flag customers who never appear as a sender at all. Everything else
     here is sender-side.
+
+    `pattern_types` is an alias for `patterns`, accepted because the two
+    neighbouring tools in every plan — feature_engineer and ml_detect — spell
+    the same concept that way. docs/CONTRACTS.md is frozen and specifies
+    `patterns` here, so the contract's name stays primary and this is purely
+    additive: existing callers are unaffected. If both are given, `patterns`
+    wins, since that is the name the contract guarantees.
     """
+    if patterns is None and pattern_types is not None:
+        patterns = pattern_types
+
     try:
         df = ctx.df
         if df is None or len(df) == 0:
