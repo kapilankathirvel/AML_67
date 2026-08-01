@@ -120,6 +120,37 @@ def render_plan_trace(response: dict) -> None:
         # ------------------------------------------------------------------
         decisions = plan_obj.get("decisions", [])
         if decisions:
-            st.subheader("Re-planning Decisions", divider="grey")
-            for d in decisions:
-                st.info(d)
+            # Two different things share this list and read badly mixed together.
+            #
+            # The planner's own audit trail (source / proposed / rejected /
+            # executed) is a contiguous record of one decision, and it is
+            # emitted in two bursts — the first lines before execution, the
+            # `executed` line after — so in source order it arrives split by
+            # every tool's runtime note. Grouping by prefix reassembles it.
+            #
+            # It also renders as one monospace block rather than one st.info
+            # box per line: a six-box stack buries the tool notes underneath,
+            # and this content is a log, so it should look like one.
+            planner_lines = [d for d in decisions if d.startswith("planner:")]
+            runtime_lines = [d for d in decisions if not d.startswith("planner:")]
+
+            if planner_lines:
+                st.subheader("Planner Audit Trail", divider="grey")
+                rejected = any(d.startswith("planner: rejected") for d in planner_lines)
+                source_llm = any("source=llm" in d for d in planner_lines)
+                if source_llm:
+                    st.success("Plan chosen by the LLM and accepted by the validator.")
+                elif rejected:
+                    st.warning(
+                        "The LLM proposed a plan, the validator rejected it, and the "
+                        "deterministic plan ran instead. Both are recorded below."
+                    )
+                st.code(
+                    "\n".join(d.removeprefix("planner: ") for d in planner_lines),
+                    language="text",
+                )
+
+            if runtime_lines:
+                st.subheader("Re-planning Decisions", divider="grey")
+                for d in runtime_lines:
+                    st.info(d)

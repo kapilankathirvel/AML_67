@@ -42,7 +42,28 @@ def complete_json(prompt: str, schema_hint: str = "") -> dict[str, Any] | None:
             result = _complete_groq(prompt, schema_hint)
         elif settings.llm_provider == "ollama":
             result = _complete_ollama(prompt, schema_hint)
-    except Exception:
+        else:
+            # No branch matched: either no provider configured, or the
+            # configured one has no key. Worth saying once — a run where the
+            # LLM never fires looks identical to one where it fires and adds
+            # nothing, and the difference matters when reading a plan trace.
+            logger.debug(
+                "complete_json: no usable provider (llm_provider=%r) — using fallbacks",
+                settings.llm_provider,
+            )
+    except Exception as exc:
+        # Returning None here is the contract (every caller has a non-LLM
+        # path), but swallowing the reason silently is how a misconfigured
+        # model — say, ollama_model naming something that was never pulled —
+        # looks exactly like "the LLM had nothing to add". Log it; the caller
+        # still gets None and still falls back.
+        logger.warning(
+            "complete_json failed (provider=%s, model=%s): %s: %s — falling back",
+            settings.llm_provider,
+            settings.ollama_model if settings.llm_provider == "ollama" else "-",
+            type(exc).__name__,
+            exc,
+        )
         result = None
 
     if result is not None:
@@ -156,10 +177,25 @@ def warm_ollama() -> None:
             settings.ollama_keep_alive,
         )
     except Exception as exc:
+        # The overwhelmingly common cause is a model named in config that was
+        # never pulled — ollama_model defaults to a 7B while a smaller one may
+        # be what is actually on disk. Ollama answers that with a 404 whose
+        # body names the model, so say the exact command that fixes it rather
+        # than leaving the reader to infer it from a stack trace.
+        detail = str(exc)
+        hint = ""
+        if "404" in detail or "not found" in detail.lower():
+            hint = (
+                f"  ->  that model is not pulled. Either run "
+                f"`ollama pull {settings.ollama_model}`, or point OLLAMA_MODEL at "
+                f"one you already have (`ollama list` to see them)."
+            )
         logger.warning(
-            "Ollama pre-warm failed (model=%s): %s — LLM calls will fall back to rules parser",
+            "Ollama pre-warm failed (model=%s): %s — LLM calls will fall back to "
+            "the rules parser and the deterministic planner.%s",
             settings.ollama_model,
             exc,
+            hint,
         )
 
 # ---------------------------------------------------------------------------

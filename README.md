@@ -338,6 +338,28 @@ uvicorn backend.main:app --port 8000       # terminal 1
 streamlit run frontend/app.py               # terminal 2 (reads AML_API_URL, defaults to localhost:8000)
 ```
 
+**Demo with the LLM planner (Windows):**
+
+```powershell
+.\scripts\run_demo.ps1 check        # is Ollama up, is the model pulled?
+.\scripts\run_demo.ps1 backend      # terminal 1 — planner ON
+.\scripts\run_demo.ps1 frontend     # terminal 2
+```
+
+The script exists because two settings fail *quietly* when set by hand, and a run that has gone wrong looks
+identical to one that worked:
+
+- `AML_LLM_PLANNER` defaults to `0`, so the plan trace shows none of the `planner:` audit lines the demo is
+  meant to show. (It defaults off deliberately — see the note above about `conftest.py`.)
+- `OLLAMA_MODEL` defaults to a 7B that may not be pulled. A model that isn't on disk makes every LLM call
+  return `None`, and the fallbacks are good enough that the system just runs deterministically without
+  complaint.
+
+`run_demo.ps1 backend` refuses to start rather than launch into that second state, and `check` tells you
+the exact `ollama pull` command if the model is missing. Add `-Deterministic` to run the intent→tool table
+instead, which is useful for demonstrating both modes side by side. It sets environment variables for its
+own process only — nothing on disk is modified, and env vars take precedence over `.env`.
+
 **Run the test suite:**
 ```bash
 pytest tests/ -v

@@ -867,7 +867,14 @@ def load_data(
                     ),
                 )
             tx_df, cust_df = _adapt_synthetic()
-            source_label = "synthetic (aml_sample.csv)"
+            # Name the SOURCE KEY, not just the family. Both synthetic sources
+            # used to render as "synthetic (<file>.csv)", differing only by the
+            # filename in parentheses — and these two are exactly the pair that
+            # must never be confused: every published metric is computed
+            # against this one, while load_data's own default is the other. A
+            # label that requires reading the filename to tell them apart is a
+            # trap in a trace panel people skim.
+            source_label = "synthetic — the labelled metrics set (aml_sample.csv)"
 
         elif source == "synthetic_alt":
             if not _SYNTHETIC_ALT_FILE.exists():
@@ -879,7 +886,7 @@ def load_data(
                     ),
                 )
             tx_df, cust_df = _adapt_synthetic_alt()
-            source_label = "synthetic (aml_sample_alt.csv)"
+            source_label = "synthetic_alt — the alt-schema set, NOT the metrics set (aml_sample_alt.csv)"
 
         else:
             return ToolResult(
