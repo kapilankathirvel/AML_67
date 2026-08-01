@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from backend.agent import registry
 from backend.agent.executor import run_plan
 from backend.agent.intent_parser import parse_intent
-from backend.agent.planner import build_plan
+from backend.agent.llm_planner import plan_query, record_executed_plan
 from backend.config import settings
 from backend.schemas import AgentResponse
 from backend.tools.base import ToolContext
@@ -66,8 +66,13 @@ def dataset_summary() -> dict:
 @app.post("/query", response_model=AgentResponse)
 def query(request: QueryRequest) -> AgentResponse:
     intent = parse_intent(request.query)
-    plan = build_plan(intent)
+    # plan_query is build_plan plus an optional LLM planning step in front of
+    # it; with settings.aml_llm_planner off (the default) it IS build_plan.
+    plan = plan_query(intent)
     response = run_plan(intent, plan)
+    # After run_plan, so the trace records the executor's own mid-run
+    # re-planning rather than only what was planned up front.
+    record_executed_plan(plan)
     _RUN_CACHE[plan.plan_id] = response
     return response
 

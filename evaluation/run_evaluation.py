@@ -31,6 +31,13 @@ tests/test_integration.py, which had to solve the same problem:
      We stub complete_json to None, which the narrator already treats as
      "fall back to the deterministic template".
 
+  4. Tool selection — settings.aml_llm_planner is pinned off. This harness
+     calls build_plan() directly and so cannot reach backend/agent/llm_planner
+     anyway, but an LLM-chosen plan would make the metrics depend on a model's
+     output, which is exactly what a reproducible baseline cannot tolerate.
+     Pinned explicitly rather than left to the module default, so the guarantee
+     is stated in the code that depends on it.
+
 ML seeding is already fixed (random_state=42 in ml_detect.py), so with the
 above the run reproduces byte-for-byte.
 """
@@ -103,6 +110,10 @@ def run_agent_flags(source: str = "synthetic") -> tuple[set[str], set[str], dict
     original_complete_json = narrator_mod.complete_json
     narrator_mod.complete_json = lambda *args, **kwargs: None
 
+    # (4) deterministic tool selection
+    original_llm_planner = settings.aml_llm_planner
+    settings.aml_llm_planner = False
+
     try:
         # (2) construct the intent directly — never call the LLM parser
         intent = QueryIntent(
@@ -118,6 +129,7 @@ def run_agent_flags(source: str = "synthetic") -> tuple[set[str], set[str], dict
         response = run_plan(intent, plan)
     finally:
         narrator_mod.complete_json = original_complete_json
+        settings.aml_llm_planner = original_llm_planner
         executor_mod._TOOLS_CACHE = None
 
     any_flag = {f.entity_id for f in response.flags}

@@ -116,6 +116,41 @@ practice: several params (`filter_data`'s flattened `Filters` fields, `feature_e
 corrected once real tools existed to check against (see the Phase 6/7 history in
 [TRACK_A_PROGRESS.md](TRACK_A_PROGRESS.md) if you want the full story).
 
+### 2b. LLM planner (`backend/agent/llm_planner.py`, opt-in)
+
+`build_plan` above is deterministic: the tool sequence inside each branch is a constant. With
+`AML_LLM_PLANNER=1`, `plan_query()` puts an LLM planning step in front of it and the model selects the
+tools itself. Three modules cooperate:
+
+| Module | Job |
+|---|---|
+| `tool_schema.py` | Renders the tool catalog from each tool's own `_tool_description`/`_tool_params` — the metadata the `@tool` decorator has always recorded and nothing previously read. One reader, so the prompt cannot drift from what the tools accept. |
+| `plan_validator.py` | Twelve rules (V0–V11) over the proposal: registry membership, dependency ordering, no duplicates, `load_data` first, ≤12 steps, declared param names, a stated reason per step. Collects **all** violations, not the first. |
+| `llm_planner.py` | Prompt, fallback, and audit trail. |
+
+Two design points worth stating explicitly:
+
+**The deterministic planner is the floor, not the alternative.** Every failure path — LLM unavailable,
+unparseable JSON, any validation rejection — returns `build_plan(intent)`. Contract 4 in
+[CONTRACTS.md](CONTRACTS.md) is therefore still honoured as the guaranteed behaviour of this system; the
+LLM can only do *better* than it for a given query, never something illegal. Contract 4 is unchanged and
+was not edited for this feature.
+
+**Validation is about legality, not quality.** V5–V7 mirror real preconditions in the tool bodies
+(`rules.py` reads `ctx.artifacts["features"]`; `risk.py` reads `rule_hits`/`ml_scores`), so a passing plan
+cannot fail on a missing artifact. A plan that is legal but poorly chosen still runs — the trace records
+what was picked and why. Encoding the deterministic planner's *opinions* into the validator would defeat
+the point of asking a model at all.
+
+The audit trail (`planner: source=` / `proposed =` / `rejected —` / `executed =`) goes into
+`plan.decisions[]`, which the UI already renders, so this needed no frontend change. `executed` is
+appended after the run and therefore includes the executor's own re-planning — that is how
+proposed-vs-executed divergence stays visible.
+
+`_tool_params` is only checked when non-empty: `backend/tools/_mocks.py` declares no param schemas, so
+strict checking would reject every plan under `AML_USE_MOCKS=1`. An empty declaration means "unvalidated"
+and emits a note, keeping the gap auditable rather than silent.
+
 ### 3. Executor (`backend/agent/executor.py`)
 
 `(QueryIntent, ExecutionPlan) → AgentResponse`. Threads one `ToolContext` through every step, merging each

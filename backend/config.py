@@ -30,5 +30,17 @@ class Settings(BaseSettings):
     aml_dataset_path: str = "data/sample/aml_sample.csv"
     aml_api_base_url: str = "http://localhost:8000"
 
+    # Let the LLM choose which tools to run (backend/agent/llm_planner.py),
+    # validated against backend/agent/plan_validator.py and falling back to the
+    # deterministic planner on any failure.
+    #
+    # Defaults to False deliberately. There is no tests/conftest.py: each test
+    # file stubs the LLM per-module, so a default of True would let the test
+    # suite and the evaluation harness make real network calls against the .env
+    # keys. Off by default means this repo's default behaviour is byte-identical
+    # to what it was before the LLM planner existed, and the eval harness stays
+    # reproducible without depending on anyone remembering to stub it.
+    aml_llm_planner: bool = False
+
 
 settings = Settings()

@@ -1,0 +1,235 @@
+"""
+Whitelist validation for an LLM-proposed execution plan.
+
+This is the component that makes LLM tool-selection safe to run in a compliance
+setting. The model proposes; this module decides whether the proposal is legal;
+backend/agent/llm_planner.py falls back to the deterministic planner if it is
+not. Nothing an LLM returns reaches the executor unchecked.
+
+What it validates and what it deliberately does not
+---------------------------------------------------
+It enforces *safety and dependency legality*, not plan quality. V5-V7 mirror
+real preconditions in the tool bodies — backend/tools/rules.py reads
+ctx.artifacts["features"], backend/tools/risk.py reads rule_hits/ml_scores — so
+a plan that passes cannot fail on a missing artifact. A plan that is legal but
+poorly chosen (profiling the dataset for a single-entity query, say) still
+passes; it runs, and the trace records what was chosen and why. Judging whether
+a legal plan was a *good* plan is not something a whitelist can do, and
+pretending otherwise would mean encoding the deterministic planner's opinions
+back into the validator, which would defeat the point of asking a model.
+
+All violations are collected rather than short-circuiting on the first, so the
+audit trail states everything wrong with a rejected proposal.
+
+The V10 exemption is load-bearing
+---------------------------------
+Parameter names are only checked when the tool actually declares a parameter
+schema. backend/tools/_mocks.py declares `params` on none of its nine tools, so
+under AML_USE_MOCKS=1 (the default, and what most of the test suite runs)
+every declared set is empty. Strict checking would reject every non-trivial plan
+in exactly the configuration used for testing. An empty set therefore means
+"cannot be validated" and emits a note, so the gap is itself auditable rather
+than silent.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Callable
+
+from backend.agent.tool_schema import declared_params
+from backend.schemas import QueryIntent, ToolCall
+
+# A generous ceiling: the longest deterministic plan is 8 steps and no tool may
+# repeat, so 12 cannot constrain a legitimate plan. It exists to bound a
+# degenerate model response, not to express a policy about plan length.
+MAX_STEPS = 12
+
+# Tools whose preconditions are satisfied by another tool having already run.
+# Kept as data so a new dependency is one line, not a new branch.
+_REQUIRES_BEFORE: dict[str, tuple[str, ...]] = {
+    "rule_detect": ("feature_engineer",),
+    "ml_detect": ("feature_engineer",),
+}
+
+# risk_classify needs at least one of these, not all of them.
+_RISK_CLASSIFY_ANY_OF = ("rule_detect", "ml_detect")
+
+
+@dataclass
+class ValidationResult:
+    ok: bool
+    steps: list[ToolCall] = field(default_factory=list)
+    rejections: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+
+
+def _coerce_steps(raw: Any, rejections: list[str]) -> list[dict] | None:
+    """V0 — shape check. Returns None if the payload is unusable."""
+    if not isinstance(raw, dict):
+        rejections.append(f"malformed proposal: expected an object, got {type(raw).__name__}")
+        return None
+
+    steps = raw.get("steps")
+    if not isinstance(steps, list):
+        rejections.append(f"malformed proposal: 'steps' must be a list, got {type(steps).__name__}")
+        return None
+    if not steps:
+        rejections.append("malformed proposal: 'steps' is empty")
+        return None
+
+    clean: list[dict] = []
+    for i, step in enumerate(steps):
+        if not isinstance(step, dict):
+            rejections.append(f"malformed proposal: step {i} is {type(step).__name__}, expected an object")
+            return None
+        tool = step.get("tool")
+        if not isinstance(tool, str) or not tool.strip():
+            rejections.append(f"malformed proposal: step {i} has no usable 'tool' name")
+            return None
+        params = step.get("params", {})
+        if params is None:
+            params = {}
+        if not isinstance(params, dict):
+            rejections.append(f"malformed proposal: step {i} ('{tool}') has non-object 'params'")
+            return None
+        reason = step.get("reason", "")
+        clean.append({"tool": tool.strip(), "params": params, "reason": str(reason or "").strip()})
+    return clean
+
+
+def validate_proposal(
+    raw: Any,
+    intent: QueryIntent,
+    tools: dict[str, Callable],
+) -> ValidationResult:
+    """Validate an LLM plan proposal against the registered tools.
+
+    `tools` must be the SAME registry snapshot the executor will dispatch
+    against — see llm_planner.plan_query, which passes executor._get_tools().
+    Validating against real tools while mocks execute would let a plan through
+    that the executor cannot actually run.
+    """
+    rejections: list[str] = []
+    notes: list[str] = []
+
+    steps = _coerce_steps(raw, rejections)
+    if steps is None:
+        return ValidationResult(ok=False, rejections=rejections)
+
+    names = [s["tool"] for s in steps]
+    declared = declared_params(tools)
+
+    # V1 — length
+    if len(steps) > MAX_STEPS:
+        rejections.append(f"proposed {len(steps)} steps, max is {MAX_STEPS}")
+
+    # V2 — every tool exists
+    for name in names:
+        if name not in tools:
+            rejections.append(f"unknown tool '{name}' not in registry")
+
+    # V3 — no duplicates
+    for name in sorted(set(names)):
+        if names.count(name) > 1:
+            rejections.append(f"tool '{name}' proposed more than once")
+
+    # V4 — load_data first
+    if names[0] != "load_data":
+        rejections.append(f"load_data must be the first step, got '{names[0]}'")
+
+    # V5/V6 — ordering dependencies
+    for tool_name, prerequisites in _REQUIRES_BEFORE.items():
+        if tool_name not in names:
+            continue
+        idx = names.index(tool_name)
+        for prereq in prerequisites:
+            if prereq not in names or names.index(prereq) > idx:
+                rejections.append(f"{tool_name} requires {prereq} before it")
+
+    # V7 — risk_classify needs something to fuse
+    if "risk_classify" in names:
+        idx = names.index("risk_classify")
+        if not any(d in names and names.index(d) < idx for d in _RISK_CLASSIFY_ANY_OF):
+            rejections.append("risk_classify requires rule_detect or ml_detect before it")
+
+    # V8 — filter_data cannot precede the data
+    if "filter_data" in names and names.index("filter_data") == 0:
+        rejections.append("filter_data must follow load_data")
+
+    # V9 — entity_lookup needs an entity to look up
+    if "entity_lookup" in names and not intent.entities:
+        rejections.append("entity_lookup proposed but no entity was extracted from the query")
+
+    # V10 — parameter names, only where a schema was declared
+    for step in steps:
+        allowed = declared.get(step["tool"])
+        if allowed is None:
+            continue  # unknown tool; already rejected by V2
+        if not allowed:
+            if step["params"]:
+                notes.append(
+                    f"params for '{step['tool']}' not validated — tool declares no param schema"
+                )
+            continue
+        for key in sorted(step["params"]):
+            if key not in allowed:
+                rejections.append(f"{step['tool']}: undeclared param '{key}'")
+
+    # V11 — every step must justify itself; the reason is user-facing audit text
+    for step in steps:
+        if not step["reason"]:
+            rejections.append(f"{step['tool']}: missing reason")
+
+    if rejections:
+        return ValidationResult(ok=False, rejections=rejections, notes=notes)
+
+    calls, norm_notes = _normalise(steps, intent)
+    return ValidationResult(ok=True, steps=calls, rejections=[], notes=notes + norm_notes)
+
+
+def _normalise(steps: list[dict], intent: QueryIntent) -> tuple[list[ToolCall], list[str]]:
+    """Repair a valid plan's params from the parsed intent.
+
+    This runs only after every rule has passed, and can never reject: it fills
+    in what the model left out rather than judging it. Two things must be
+    injected or the plan silently does the wrong thing:
+
+      filter_data — without the parsed Filters the query's own date/amount/
+      country constraints are dropped and the plan analyses everything.
+
+      entity_lookup — the `entity_id` KEY must exist even when the value is
+      None, because backend/agent/executor.py only re-syncs the resolved real
+      customer ID into a later step `if "entity_id" in later.params`.
+    """
+    # Imported here rather than at module scope: planner imports nothing from
+    # this module, and keeping the dependency one-way avoids a cycle if the
+    # planner ever wants to validate its own output.
+    from backend.agent.planner import _filter_kwargs
+
+    notes: list[str] = []
+    calls: list[ToolCall] = []
+
+    for step in steps:
+        params = dict(step["params"])
+
+        if step["tool"] == "filter_data":
+            injected = []
+            for key, value in _filter_kwargs(intent.filters).items():
+                if value is None:
+                    continue
+                if key not in params:
+                    params[key] = value
+                    injected.append(key)
+            if injected:
+                notes.append(
+                    "injected filter_data params from the parsed query: " + ", ".join(sorted(injected))
+                )
+
+        if step["tool"] == "entity_lookup" and "entity_id" not in params:
+            params["entity_id"] = intent.entities[0] if intent.entities else None
+            notes.append("injected entity_lookup entity_id from the parsed query")
+
+        calls.append(ToolCall(tool=step["tool"], params=params, reason=step["reason"]))
+
+    return calls, notes

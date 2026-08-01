@@ -101,6 +101,62 @@ Every decision — what ran, what was skipped, what got added mid-run, and why �
 `plan.decisions[]` / `plan.tools_considered_but_skipped[]` and shown directly in the UI's execution-plan
 trace panel. That panel, not the ML, is the thing this project is actually graded on.
 
+### Two planners: an LLM one, with a deterministic floor
+
+The table above is the **deterministic** planner: one branch per intent, and the tool sequence within a
+branch is fixed. It is a routing table, and calling it "agentic" on its own would be overselling it.
+
+Setting `AML_LLM_PLANNER=1` enables a second planner (`backend/agent/llm_planner.py`) in which the model
+genuinely chooses the tools. It is shown the real tool catalog — built by `backend/agent/tool_schema.py`
+from each tool's own `@tool(description=..., params=...)` declaration, so it can never drift from what the
+tools actually accept — and returns a proposed sequence. That proposal is not trusted:
+`backend/agent/plan_validator.py` checks it against twelve rules before anything executes.
+
+| Check | Rejects |
+|---|---|
+| Registry | a tool name that doesn't exist |
+| Ordering | `rule_detect`/`ml_detect` without `feature_engineer` first; `risk_classify` with nothing to fuse; `filter_data` before `load_data` |
+| Structure | `load_data` not first, duplicated tools, more than 12 steps, a step with no stated reason |
+| Params | a parameter name the tool doesn't declare |
+| Context | `entity_lookup` when the query names no entity |
+
+The ordering rules mirror real preconditions in the tool bodies (`rules.py` reads
+`ctx.artifacts["features"]`, `risk.py` reads `rule_hits`/`ml_scores`), so a plan that passes cannot fail on
+a missing artifact. **On any rejection — or if the LLM is unavailable, or returns unparseable JSON — the
+deterministic plan runs instead.** That is what makes this safe to turn on: the routing table above is the
+guaranteed floor of the system's behaviour, never the ceiling.
+
+The whole exchange is written to the same `plan.decisions[]` the UI already renders:
+
+```
+planner: source=llm
+planner: proposed = load_data -> filter_data -> feature_engineer -> rule_detect -> risk_classify
+planner: validated OK against 9 registered tools
+planner: injected filter_data params from the parsed query: amount_min
+planner: executed = load_data -> filter_data -> feature_engineer -> rule_detect -> risk_classify
+```
+
+and when a proposal is refused:
+
+```
+planner: source=deterministic (LLM plan rejected)
+planner: proposed = load_data -> rule_detect -> feature_engineer
+planner: rejected — rule_detect requires feature_engineer before it
+planner: fell back to the deterministic plan for intent 'pattern_search'
+planner: executed = load_data -> filter_data -> feature_engineer -> rule_detect -> ml_detect -> risk_classify
+```
+
+The `executed` line is appended *after* the run, so it captures the executor's own mid-run re-planning —
+in that second example the deterministic plan included `ml_detect`, which the proposal had omitted. A
+compliance reviewer can therefore see what the model wanted, whether it was allowed, why not if it wasn't,
+and what actually ran. "The model chose it" becomes checkable rather than asserted.
+
+**The flag defaults to off.** There is no `tests/conftest.py` in this repo — each test file stubs the LLM
+per-module — so a default of on would let the test suite and the evaluation harness issue real API calls.
+Off by default also means every published metric is produced by the deterministic path:
+`evaluation/run_evaluation.py` pins the flag explicitly, and the results are byte-identical with the LLM
+planner present or absent.
+
 Full intent → tool mapping table: **[docs/CONTRACTS.md](docs/CONTRACTS.md) Contract 4**.
 
 ## Architecture

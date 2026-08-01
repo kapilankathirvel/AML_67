@@ -156,3 +156,38 @@ def test_positives_accessor_rejects_an_unknown_definition():
 
     with pytest.raises(ValueError, match="unknown ground-truth definition"):
         gt.positives("receiver_only")
+
+
+# ---------------------------------------------------------------------------
+# The harness must never reach the LLM planner
+# ---------------------------------------------------------------------------
+
+
+def test_harness_pins_the_llm_planner_off_even_when_enabled(monkeypatch):
+    """Published metrics must not depend on a model's tool choices.
+
+    Adversarial on purpose: aml_llm_planner is switched ON and the planner's
+    LLM call is made to explode. run_agent_flags is expected to pin the flag
+    off for the duration, so the run completes and the explosion never fires.
+    If someone later re-points the harness at plan_query without pinning, this
+    fails loudly instead of silently making the baseline nondeterministic.
+
+    Runs the real pipeline once (~1 minute) — it is the only way to prove the
+    guarantee end to end rather than by reading the source.
+    """
+    import backend.agent.llm_planner as llm_planner_mod
+    from backend.config import settings
+    from evaluation.run_evaluation import run_agent_flags
+
+    def explode(*a, **kw):
+        raise AssertionError("the evaluation harness reached the LLM planner")
+
+    monkeypatch.setattr(settings, "aml_llm_planner", True)
+    monkeypatch.setattr(llm_planner_mod, "complete_json", explode)
+
+    any_flag, high_only, metrics = run_agent_flags(source="synthetic")
+
+    assert any_flag, "expected the pipeline to still produce flags"
+    assert high_only <= any_flag
+    assert metrics.get("customer_count") == 270
+    assert settings.aml_llm_planner is True, "run_agent_flags must restore the caller's setting"
