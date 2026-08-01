@@ -16,8 +16,10 @@ preconditions in the tool bodies — backend/tools/rules.py reads
 ctx.artifacts["features"], backend/tools/risk.py reads rule_hits/ml_scores — so
 a plan that passes cannot fail on a missing artifact.
 
-V12 enforces *answerability*: the plan must contain the tool that produces the
-response its intent promises. This was not in the original design, which held
+V12 and V13 enforce *answerability*: the plan must contain the tool that
+produces the response its intent promises (V12), and any parameter drawn from a
+closed set must actually be in it (V13). Both were added after a plan passed
+every other rule and still returned nothing. This was not in the original design, which held
 that anything beyond dependency legality would mean encoding the deterministic
 planner's opinions back into the validator. Measuring showed that reasoning was
 too permissive. With V0-V11 alone a local model hit 60% acceptance while only 1
@@ -62,10 +64,10 @@ than silent.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Callable, get_args
 
 from backend.agent.tool_schema import declared_params
-from backend.schemas import QueryIntent, ToolCall
+from backend.schemas import PatternType, QueryIntent, ToolCall
 
 # A generous ceiling: the longest deterministic plan is 8 steps and no tool may
 # repeat, so 12 cannot constrain a legitimate plan. It exists to bound a
@@ -98,6 +100,38 @@ _RISK_CLASSIFY_ANY_OF = ("rule_detect", "ml_detect")
 # broken, not merely suboptimal. Everything upstream of the terminal tool is
 # still the model's choice: which filters, whether to use rules or ML or both,
 # whether to profile first. This constrains the output, not the route to it.
+# V13 — parameters whose VALUES come from a closed set, not just whose names
+# have to exist.
+#
+# Added after a live run against a local model. The plan below was ACCEPTED —
+# every tool real, every dependency satisfied, the terminal tool present:
+#
+#   proposed = load_data -> filter_data -> feature_engineer
+#              -> rule_detect -> risk_classify
+#   feature_engineer: 294 customers x 0 features for pattern_types=[risk]
+#   rule_detect: 0 total hits, rules evaluated=[]
+#   risk_classify: no rule hits and no ML anomalies - clean dataset
+#
+# "risk" is not a PatternType. feature_engineer computed nothing, rule_detect
+# ran nothing, and "who are my riskiest customers?" returned an empty answer
+# with no warning. V10 checks that `pattern_types` is a declared parameter NAME
+# on that tool; nothing checked that its contents were legal. That is the same
+# failure V12 exists to prevent — a plan that cannot answer — arriving through
+# a different door.
+#
+# Scope is deliberately narrow: only parameters whose legal values are a fixed
+# literal in the frozen schema. Free-form values (amounts, dates, entity ids)
+# are the tools' business, and guessing at their validity here would duplicate
+# logic that already lives in the tools and drift from it.
+_PATTERN_VALUES: frozenset[str] = frozenset(get_args(PatternType))
+
+_ENUM_PARAMS: dict[str, frozenset[str]] = {
+    # feature_engineer and ml_detect spell it pattern_types; rule_detect's
+    # frozen contract spells it patterns, with pattern_types as an alias.
+    "pattern_types": _PATTERN_VALUES,
+    "patterns": _PATTERN_VALUES,
+}
+
 _REQUIRED_TERMINAL: dict[str, str] = {
     "full_analysis": "risk_classify",
     "pattern_search": "risk_classify",
@@ -292,6 +326,20 @@ def validate_proposal(
             f"intent '{intent.intent}' needs {required} to produce a result, "
             f"but the plan ends at '{names[-1]}'"
         )
+
+    # V13 — closed-set parameter VALUES, not just names
+    for step in steps:
+        for key, allowed_values in _ENUM_PARAMS.items():
+            if key not in step["params"]:
+                continue
+            value = step["params"][key]
+            values = value if isinstance(value, list) else [value]
+            for item in values:
+                if item not in allowed_values:
+                    rejections.append(
+                        f"{step['tool']}: '{item}' is not a valid {key} — "
+                        f"expected one of {sorted(allowed_values)}"
+                    )
 
     if rejections:
         return ValidationResult(ok=False, rejections=rejections, notes=notes)

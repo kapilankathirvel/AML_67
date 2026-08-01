@@ -232,6 +232,24 @@ def _sanitize_llm_result(llm_result: dict, reference_date: date, raw_query: str 
         for key in ("countries", "txn_types"):
             if filters.get(key) is None:
                 filters.pop(key, None)
+        # Drop "select everything" placeholders. Asked for smurfing behaviour
+        # with no type restriction, the model returns txn_types=['all'] — which
+        # is not a transaction type, matches nothing, and is correctly ignored
+        # downstream ("filter_data: no filters applied"). Harmless, but it shows
+        # in the execution-plan trace as `Filters: txn_types=['all']`, which
+        # reads like a filter was applied when none was. An empty list says the
+        # same thing truthfully.
+        for key in ("countries", "txn_types"):
+            values = filters.get(key)
+            if isinstance(values, list):
+                cleaned = [
+                    v for v in values
+                    if str(v).strip().lower() not in {"all", "any", "*", ""}
+                ]
+                if cleaned:
+                    filters[key] = cleaned
+                else:
+                    filters.pop(key, None)
         # Normalise country names → ISO-2 codes so they match the dataset columns.
         # LLMs often return 'Germany' even when told to use 'DE'.
         if filters.get("countries"):

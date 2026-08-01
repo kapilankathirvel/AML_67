@@ -124,6 +124,35 @@ def test_llm_result_with_relative_date_shorthand_and_none_fields_still_parses_as
     assert result.filters.txn_types == []
 
 
+@pytest.mark.parametrize("supplied,expected", [
+    (["all"], []),
+    (["any"], []),
+    (["*"], []),
+    (["ALL"], []),
+    (["all", "wire"], ["wire"]),
+    (["wire", "cash"], ["wire", "cash"]),
+])
+def test_select_everything_placeholders_are_dropped_from_filters(monkeypatch, supplied, expected):
+    """Observed live: asked for smurfing with no type restriction, the model
+    returned txn_types=['all']. It is not a transaction type, matches nothing,
+    and filter_data correctly ignored it — but the execution-plan trace then
+    showed `Filters: txn_types=['all']`, which reads as though a filter had
+    been applied. An empty list says the same thing truthfully."""
+    monkeypatch.setattr(
+        "backend.agent.intent_parser.complete_json",
+        lambda *a, **kw: {
+            "intent": "pattern_search",
+            "filters": {"txn_types": supplied},
+            "pattern_types": ["smurfing"],
+            "confidence": 0.9,
+        },
+    )
+    result = parse_intent("show me any smurfing behaviour", reference_date=date(2025, 3, 31))
+
+    assert result.parsed_by == "llm"
+    assert result.filters.txn_types == expected
+
+
 def test_llm_result_with_gemini_style_shorthand_dates(monkeypatch):
     """Same bug class, Gemini's shorthand form ("-30d") rather than Groq's
     ("1 month ago") — both must resolve through the same coercion path."""

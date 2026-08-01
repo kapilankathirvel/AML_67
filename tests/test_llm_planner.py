@@ -378,6 +378,70 @@ def test_repair_never_adds_a_detector(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# V13 — closed-set parameter VALUES
+# ---------------------------------------------------------------------------
+
+
+def _plan_with_pattern(value):
+    return {"steps": [
+        {"tool": "load_data", "params": {}, "reason": "load"},
+        {"tool": "feature_engineer", "params": {"pattern_types": value}, "reason": "features"},
+        {"tool": "rule_detect", "params": {}, "reason": "detect"},
+        {"tool": "risk_classify", "params": {}, "reason": "score"},
+    ]}
+
+
+def test_invalid_pattern_type_value_is_rejected(monkeypatch):
+    """The bug this rule was written for, reproduced.
+
+    Observed live: the model proposed pattern_types=["risk"] on a plan that was
+    otherwise entirely legal — real tools, dependencies satisfied, terminal tool
+    present — and it was ACCEPTED. "risk" is not a PatternType, so
+    feature_engineer computed 0 features, rule_detect evaluated 0 rules, and
+    "who are my riskiest customers?" returned an empty answer with no warning.
+    """
+    _enable(monkeypatch)
+    _stub_llm(monkeypatch, _plan_with_pattern(["risk"]))
+    plan = plan_query(_intent("ranking"))
+
+    assert "source=deterministic" in _decisions(plan)
+    assert "'risk' is not a valid pattern_types" in _decisions(plan)
+
+
+def test_valid_pattern_type_value_is_accepted(monkeypatch):
+    _enable(monkeypatch)
+    _stub_llm(monkeypatch, _plan_with_pattern(["structuring"]))
+    plan = plan_query(_intent("ranking"))
+    assert "source=llm" in _decisions(plan)
+
+
+def test_pattern_value_checked_on_rule_detect_alias_too(monkeypatch):
+    """rule_detect's frozen contract spells it `patterns`; both names carry the
+    same closed set and both must be checked."""
+    _enable(monkeypatch)
+    _stub_llm(monkeypatch, {"steps": [
+        {"tool": "load_data", "params": {}, "reason": "load"},
+        {"tool": "feature_engineer", "params": {}, "reason": "features"},
+        {"tool": "rule_detect", "params": {"patterns": ["nonsense"]}, "reason": "detect"},
+        {"tool": "risk_classify", "params": {}, "reason": "score"},
+    ]})
+    plan = plan_query(_intent("ranking"))
+    assert "'nonsense' is not a valid patterns" in _decisions(plan)
+
+
+def test_bare_string_pattern_value_is_checked_not_iterated_as_chars(monkeypatch):
+    """A model may send a string where a list is expected. It must be validated
+    as one value, not exploded into characters."""
+    _enable(monkeypatch)
+    _stub_llm(monkeypatch, _plan_with_pattern("risk"))
+    plan = plan_query(_intent("ranking"))
+
+    text = _decisions(plan)
+    assert "'risk' is not a valid pattern_types" in text
+    assert "'r' is not a valid" not in text
+
+
+# ---------------------------------------------------------------------------
 # V12 — the plan must be able to answer the question
 # ---------------------------------------------------------------------------
 

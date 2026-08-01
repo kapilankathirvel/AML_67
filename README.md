@@ -187,7 +187,31 @@ is ever repaired, or "the LLM chose this plan" would stop being true.
 
 What remains is model capacity, not prompt wording. The prompt names the required tool for that specific
 query, and a 3B model still returned a one-step plan for *"what does this dataset look like?"*.
-`full_analysis` scores 2/2; `eda`, `entity_investigation` and `threshold_query` score 0.
+
+**The failures are systematic, not noisy** — which matters more than the percentage. Repeating all 15
+queries three times, clearing the LLM response cache between repeats so nothing replays:
+
+```
+per-run useful counts : [4, 4, 4] of 15      stdev 0.0 points
+always accepted : 4      always rejected : 11      unstable : 0
+rejection reasons across 45 proposals: 27 answerability, 6 dependency ordering, 0 other
+```
+
+The model succeeds on exactly the same four queries every time and fails the same eleven. It never once
+produces a working plan for `eda`, `threshold_query`, `entity_investigation` or `explain_flag`. That is a
+reproducible capability boundary rather than sampling variance — worth stating, because a single 15-query
+run has **6.7 points of granularity per query**, and an earlier run of 33% turned out to be one query of
+between-process drift rather than an improvement.
+
+Two limits on that number, both worth knowing before quoting it:
+
+- **V13 never fired in the harness.** Across all 45 proposals the model emitted no invalid pattern value.
+  The rule is verified by replaying the proposal captured from a live run, not by the harness.
+- **The harness cannot reproduce the bug V13 exists for.** It constructs `QueryIntent` objects directly to
+  isolate the planner from parser variance. The live API path runs `parse_intent` first, producing
+  different intent state, a different prompt, and proposals the harness never generates — including the
+  `pattern_types: ["risk"]` that motivated V13. Measuring the planner in isolation and measuring it in
+  situ are different measurements, and only the first one is automated here.
 
 **The part that did hold: across ~60 real proposals, zero bad plans reached the executor.** Every
 truncated, dependency-violating and malformed proposal was caught. Proposal quality is bounded by the
