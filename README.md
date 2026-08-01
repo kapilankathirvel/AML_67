@@ -315,7 +315,7 @@ translated the same way, to a fair customer-level comparison.
 | | Flagged | Precision | Recall | False-positive rate |
 |---|---|---|---|---|
 | **Naive baseline** (any txn > $9,000) | 259 / 270 | 0.197 | 1.000 | 0.950 |
-| **Our system — any flag** (LOW/MEDIUM/HIGH) | 39 / 270 | 0.590 | 0.451 | 0.073 |
+| **Our system — any flag** (LOW/MEDIUM/HIGH) | 41 / 270 | 0.561 | 0.451 | 0.082 |
 | **Our system — HIGH only** (the SAR-draft tier) | 27 / 270 | 0.778 | 0.412 | 0.027 |
 
 **Broader ground truth (sender or receiver)**
@@ -323,13 +323,13 @@ translated the same way, to a fair customer-level comparison.
 | | Flagged | Precision | Recall | False-positive rate |
 |---|---|---|---|---|
 | **Naive baseline** (any txn > $9,000) | 259 / 270 | 0.421 | 0.956 | 0.962 |
-| **Our system — any flag** (LOW/MEDIUM/HIGH) | 39 / 270 | 0.897 | 0.307 | 0.026 |
+| **Our system — any flag** (LOW/MEDIUM/HIGH) | 41 / 270 | 0.854 | 0.307 | 0.038 |
 | **Our system — HIGH only** (the SAR-draft tier) | 27 / 270 | 0.926 | 0.219 | 0.013 |
 
 The naive rule "catches everything" by flagging 96% of all customers — exactly the
-compliance-team-drowning-in-false-positives problem the brief describes. Our system flags **6.6× fewer
-customers** (39 vs. 259) at a **13× lower false-positive rate**, and under the broader ground truth
-reaches **0.897 precision** — while the naive rule manages 0.421.
+compliance-team-drowning-in-false-positives problem the brief describes. Our system flags **6.3× fewer
+customers** (41 vs. 259) at a **12× lower false-positive rate**, and under the broader ground truth
+reaches **0.854 precision** — while the naive rule manages 0.421.
 
 **Why one table looks worse than the other.** R7 (receiver-side structuring) flags accounts that *receive*
 repeated sub-threshold deposits. Those customers are positives under the broader definition and
@@ -346,9 +346,30 @@ distinct inbound counterparties against a population average of 6.9**, and in an
 out at 4. There is no separation to threshold on. 26 of the 51 receive exactly one labelled transaction —
 indistinguishable from being an ordinary counterparty of a bad actor.
 
-R5 (velocity) and R6 (dormant reactivation) never fire on this dataset (0 hits each) — the synthetic
-generator doesn't inject cohorts for those two patterns, so they're implemented and rule-tested
-(`tests/test_rules.py`) but unvalidated against real labelled data here.
+**R5 (velocity) and R6 (dormant reactivation) never fire on this dataset (0 hits each), for two
+different measured reasons — neither of them threshold tuning.**
+
+R6 is inapplicable: the dataset spans 89 days, and R6 needs a 60-day dormancy gap followed by a 7-day
+burst with at least 3 pre-gap transactions for its z-score. Only 2 of 268 senders have a gap that long
+(the largest anywhere is 64.5 days), 1 clears the burst gate, and 0 clear the z-score. Relaxing the
+dormancy threshold does not rescue it — a 30-day gap admits 108 of 268 senders, which is ordinary
+transaction cadence, not dormancy. The rule is correct; this data has no dormancy typology in it.
+
+R5 was, until this was fixed, unreachable by construction: `velocity_txns_per_hour` was computed as
+(max count in any 24h window) ÷ 24 — a daily average wearing an hourly name — so the documented bar of
+2.0 txns/hour silently meant *48 transactions inside one 24h window*. The busiest sender in the dataset
+has 25 transactions in total, so the observed maximum was 0.542 and no threshold could ever have fired
+the rule. The feature now computes a true peak 1-hour rate. R5 still fires on nobody, and that is now a
+measured fact rather than an artifact: the corrected rate admits 15 senders at gate 1 (12 of them
+labelled positives), and all 15 fail R5's second gate — the highest self-deviation z-score among them is
+2.29 against a threshold of 3.0. Dropping that gate would add 2 true positives and 3 false positives, a
+losing trade, so it stands.
+
+Correcting the unit changed the ML feature matrix and therefore the published numbers: sender-side
+precision fell from 0.590 to 0.561 as two ML-only negatives crossed the 0.95 percentile floor into the
+LOW band. Recall, the HIGH tier, and every rule-driven flag are unchanged. The regression is reported
+rather than tuned away — the alternative was shipping a feature that contradicts its own name and
+[AML_LOGIC.md](docs/AML_LOGIC.md) §3 R5 in order to protect a metric.
 
 ## Limitations
 

@@ -255,6 +255,20 @@ suspicious absent other indicators.
 - `amount_zscore_90d ≥ 3.0`
 - Feature signal: both above thresholds
 
+> **`velocity_txns_per_hour` is a peak 1-hour rate.** It was previously computed as
+> (max count in any 24h window) ÷ 24 — a daily average — which made the 2.0 bar above silently mean
+> "48 transactions inside one 24h window". No customer in `aml_sample.csv` can reach that (the busiest
+> sender has 25 transactions in total), so R5 could not fire at any threshold. The evidence field name
+> `max_txns_per_hour` and the "rate" wording in the definition both describe the peak, which is what the
+> feature now computes.
+>
+> **R5 still fires on 0 customers in the committed dataset, and this is measured, not assumed.** The
+> corrected rate admits 15 senders at the velocity gate — 12 of them labelled positives, against a 19%
+> base rate, so the velocity signal itself discriminates well. All 15 then fail the z-score gate: the
+> highest self-deviation z-score among them is 2.29 against the 3.0 threshold, and 4 have too little
+> pre-burst history to score at all. The z-score gate is kept: dropping it would fire on all 15, adding
+> 2 true positives and 3 false positives. See the Results section of [README.md](../README.md).
+
 **Business justification:**  
 High velocity alone (many small legitimate transactions, e.g. a payroll system) is not suspicious.
 The combination with a self-deviation z-score of ≥ 3σ means the activity is both unusually fast
@@ -293,6 +307,15 @@ significantly different from the customer's pre-dormancy baseline).
 - Burst after reactivation: `≥ 3 outbound transactions within 7 days`
 - Amount z-score: `≥ 2.0` (compared to pre-dormancy baseline)
 - Feature signal: dormancy gap + burst count
+
+> **R6 is inapplicable to the committed dataset and should not be retuned to fire.**
+> `aml_sample.csv` spans 89 days, while R6 needs ~70 days of structure (60-day gap, then a 7-day burst,
+> with ≥ 3 pre-gap transactions to compute the z-score against). Measured funnel: of 268 senders with
+> ≥ 2 transactions, **2** have a gap ≥ 60 days (the largest gap in the whole dataset is 64.5 days),
+> **1** clears the burst gate, and **0** clear the z-score gate. Median largest-gap per sender is 26.8
+> days. Lowering the dormancy threshold destroys the rule rather than rescuing it — a 30-day gap admits
+> 108 of 268 senders (40%), which is ordinary cadence, not dormancy. The thresholds above are correct
+> for real data; this dataset simply contains no dormancy typology.
 
 **Business justification:**  
 Dormant account reactivation is a classic money laundering technique — accounts opened with

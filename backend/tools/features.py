@@ -260,8 +260,17 @@ def _amount_zscore_90d(df: pd.DataFrame) -> pd.DataFrame:
 def _velocity_features(df: pd.DataFrame, want: set[str]) -> pd.DataFrame:
     """velocity_txns_per_hour and velocity_counterparties_per_day.
 
-    txns_per_hour:          max of (count in any 24h window / 24)
+    txns_per_hour:          max count in any 1-hour window (a peak rate)
     counterparties_per_day: mean distinct receivers per calendar day
+
+    txns_per_hour was previously (max count in any 24h window) / 24 — a daily
+    average wearing an hourly name. That made AML_LOGIC.md §3 R5's documented
+    bar of 2.0 txns/hour mean "48 transactions inside one 24h window", which no
+    customer in the committed dataset can reach: the busiest sender has 25
+    transactions in total, so the observed maximum was 0.542 and R5 fired on
+    nobody, at any threshold. AML_LOGIC.md names the evidence field
+    `max_txns_per_hour` and R5's definition is a *rate*, so the peak 1-hour
+    count is what both were always describing.
     """
     cols_out: dict[str, pd.Series] = {}
     need_tph = "velocity_txns_per_hour" in want
@@ -273,20 +282,21 @@ def _velocity_features(df: pd.DataFrame, want: set[str]) -> pd.DataFrame:
     tmp = tmp.sort_values(["sender_id", "timestamp"])
 
     if need_tph:
-        # For each customer: find max transactions in any 24h window
+        # For each customer: peak transactions inside any 1-hour window.
+        # The count IS the hourly rate, so there is no division here.
         def _max_tph(grp: pd.DataFrame) -> float:
             ts = grp["timestamp"].values
             if len(ts) < 2:
-                return len(ts) / 24.0
+                return float(len(ts))
             ts_ns = ts.astype("int64")
-            window_ns = int(24 * 3600 * 1e9)
+            window_ns = int(3600 * 1e9)
             max_count = 1
             left = 0
             for right in range(len(ts_ns)):
                 while ts_ns[right] - ts_ns[left] > window_ns:
                     left += 1
                 max_count = max(max_count, right - left + 1)
-            return max_count / 24.0
+            return float(max_count)
 
         tph = tmp.groupby("sender_id").apply(_max_tph, include_groups=False)
         tph.name = "velocity_txns_per_hour"
