@@ -398,6 +398,8 @@ so both are reported:
   matches what most rules look at.
 - **Broader** — positive if they sent *or received* one (114 of 270). The extra 63 are receive-only
   participants, e.g. the destination accounts in a structuring scheme.
+- **Repeat-receiver** — positive if they sent one, *or received at least two* (84 of 270). The middle
+  ground, and arguably the most honest target — see [why it exists](#why-a-third-definition) below.
 
 The naive baseline ([AML_LOGIC.md](docs/AML_LOGIC.md) §6: "flag any transaction with `amount > $9,000`") is
 translated the same way, to a fair customer-level comparison.
@@ -418,6 +420,50 @@ translated the same way, to a fair customer-level comparison.
 | **Our system — any flag** (LOW/MEDIUM/HIGH) | 41 / 270 | 0.854 | 0.307 | 0.038 |
 | **Our system — HIGH only** (the SAR-draft tier) | 27 / 270 | 0.926 | 0.219 | 0.013 |
 
+**Repeat-receiver ground truth (sender, or received 2+)**
+
+| | Flagged | Precision | Recall | False-positive rate |
+|---|---|---|---|---|
+| **Naive baseline** (any txn > $9,000) | 259 / 270 | 0.313 | 0.964 | 0.957 |
+| **Our system — any flag** (LOW/MEDIUM/HIGH) | 41 / 270 | 0.829 | 0.405 | 0.038 |
+| **Our system — HIGH only** (the SAR-draft tier) | 27 / 270 | 0.926 | 0.298 | 0.011 |
+
+#### Why a third definition
+
+The broad definition **over-labels**. Of its 63 receive-only positives, **30 receive exactly one labelled
+transaction** — which does not distinguish a participant in a scheme from an ordinary counterparty who
+happened to be paid once by a launderer. Scoring against those 30 measures whether the system can identify
+people the data gives it no evidence about, which is not a detection problem.
+
+The repeat-receiver definition keeps the receive-only participants that show a *pattern* (33 of them) and
+drops the incidental ones. It is a strict middle ground — `sender_only ⊆ repeat_receiver ⊆ broad` — and a
+regression test pins that ordering.
+
+What it changes, and what it doesn't:
+
+- **HIGH-tier recall rises from 0.219 to 0.298** without a single detection change. The gain is entirely
+  from removing unreachable positives from the denominator, which is exactly what a fairer target should
+  do.
+- **HIGH-tier precision is unchanged at 0.926.** Every flag that was right under the broad definition is
+  still right — the 30 excluded customers were never being flagged anyway.
+- **The naive baseline's precision rises too** (0.421 → 0.313 is a *fall*, in fact, because the naive rule
+  flags 96% of everyone and a smaller positive set hurts it). The comparison stays like-for-like.
+
+Two details worth recording, both measured rather than assumed:
+
+**A fourth clause was considered and rejected.** The original roadmap phrasing was *"received more than
+once, or received from a flagged sender"*. The second clause is degenerate on this data: every labelled
+transaction's sender is a sender-side positive by construction, so it selects all 91 receivers and
+collapses straight back into the broad definition. `tests/test_evaluation.py` pins that so nobody
+re-proposes it.
+
+**"Repeat" has two possible spellings and they agree here.** Two or more labelled inbound in total, versus
+two or more from a *single* sender (the pair signal R7 keys on). Their raw receiver sets differ by three
+customers — but all three also *send* labelled transactions, so they are sender-side positives already and
+both spellings produce the identical ground truth. The simpler total-count form is implemented on that
+basis, and the test asserts the equivalence over the final positive sets rather than the intermediate
+receiver sets, because the latter genuinely differ.
+
 The naive rule "catches everything" by flagging 96% of all customers — exactly the
 compliance-team-drowning-in-false-positives problem the brief describes. Our system flags **6.3× fewer
 customers** (41 vs. 259) at a **12× lower false-positive rate**, and under the broader ground truth
@@ -435,7 +481,7 @@ receivers of labelled transactions. R7 recovers 12 of them with no measured fals
 are not reachable by any inbound rule, and we checked rather than assumed: a classic fan-in ("funnel
 account") rule has no discriminative power on this data, because the receive-only positives average **7.6
 distinct inbound counterparties against a population average of 6.9**, and in any 48-hour window both top
-out at 4. There is no separation to threshold on. 26 of the 51 receive exactly one labelled transaction —
+out at 4. There is no separation to threshold on. 29 of the 51 receive exactly one labelled transaction —
 indistinguishable from being an ordinary counterparty of a bad actor.
 
 **R5 (velocity) and R6 (dormant reactivation) never fire on this dataset (0 hits each), for two
@@ -496,7 +542,7 @@ rather than tuned away — the alternative was shipping a feature that contradic
   unreachable. That is not a missing-rule problem: we tested the obvious fix and it fails. A classic
   fan-in ("funnel account") rule cannot discriminate here — receive-only positives average 7.6 distinct
   inbound counterparties versus a population average of 6.9, and in any 48-hour window both peak at 4.
-  26 of the 51 receive exactly one labelled transaction, which is not distinguishable from being an
+  29 of the 51 receive exactly one labelled transaction, which is not distinguishable from being an
   innocent counterparty. Closing the rest would need a signal this dataset does not contain — account
   ownership, KYC linkage, or device/IP overlap.
 - Batch analysis over a sample dataset, not live streaming — explicitly in scope per the brief.

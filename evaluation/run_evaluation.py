@@ -74,11 +74,12 @@ DEFAULT_OUTPUT = _REPO_ROOT / "evaluation" / "results" / "baseline.json"
 
 FULL_ANALYSIS_QUERY = "Analyse this dataset for suspicious activity"
 
-DEFINITIONS = ("sender_only", "sender_or_receiver")
+DEFINITIONS = ("sender_only", "sender_or_receiver", "sender_or_repeat_receiver")
 
 _DEFINITION_LABEL = {
     "sender_only": "Sender-side ground truth",
     "sender_or_receiver": "Broader ground truth (sender or receiver)",
+    "sender_or_repeat_receiver": "Repeat-receiver ground truth (sender, or received 2+)",
 }
 
 
@@ -200,7 +201,9 @@ def build_payload(
             "labelled_transactions": gt.labelled_txn_count,
             "positives_sender_only": len(gt.sender_only),
             "positives_sender_or_receiver": len(gt.sender_or_receiver),
+            "positives_sender_or_repeat_receiver": len(gt.sender_or_repeat_receiver),
             "positives_receive_only": len(gt.receive_only),
+            "incidental_receivers_excluded": len(gt.incidental_receivers),
         },
         "results": {
             definition: {system: m.as_dict() for system, m in rows.items()}
@@ -281,6 +284,7 @@ def main(argv: list[str] | None = None) -> int:
 
     sender = results["sender_only"]
     broad = results["sender_or_receiver"]
+    repeat = results["sender_or_repeat_receiver"]
     caught_receive_only = len(any_flag & gt.receive_only)
 
     print(f"Flag reduction vs naive: "
@@ -289,7 +293,11 @@ def main(argv: list[str] | None = None) -> int:
           f"{sender['naive'].false_positive_rate / max(sender['any_flag'].false_positive_rate, 1e-9):.0f}x lower")
     print(f"Recall by ground truth:  "
           f"{sender['any_flag'].recall:.3f} sender-side -> "
+          f"{repeat['any_flag'].recall:.3f} repeat-receiver -> "
           f"{broad['any_flag'].recall:.3f} broader")
+    print(f"Incidental receivers:    "
+          f"{len(gt.incidental_receivers)} customers receive exactly one labelled "
+          f"transaction and are positives under the broad definition only")
     print(f"Receive-only positives:  "
           f"{caught_receive_only} of {len(gt.receive_only)} caught "
           f"({len(gt.receive_only) - caught_receive_only} remain structurally unreachable)")

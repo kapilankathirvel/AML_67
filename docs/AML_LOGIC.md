@@ -369,10 +369,15 @@ is the repeated pair relationship, not the breadth of counterparties.
 
 **Coverage, honestly:**
 R7 recovers 12 of the 63 receive-only positives with no measured false positives. The other 51 are
-not reachable by any inbound rule: 26 of them receive exactly one labelled transaction, which is
+not reachable by any inbound rule: 29 of them receive exactly one labelled transaction, which is
 indistinguishable from being an innocent counterparty of a bad actor. Closing that remainder would
 need a signal this dataset does not carry — shared account ownership, KYC linkage, or device
 overlap.
+
+That "exactly one inbound" group is also why `evaluation/harness.py` reports a third ground-truth
+definition, `sender_or_repeat_receiver`: 30 of the 63 receive-only positives have a single labelled
+inbound transaction (29 of them among the 51 R7 misses), so counting them as positives at all is
+arguably over-labelling. See the Results section of [README.md](../README.md).
 
 **Weight rationale:**
 0.75, below R1's 0.85. Receiving structured deposits is a strong signal, but attribution is weaker

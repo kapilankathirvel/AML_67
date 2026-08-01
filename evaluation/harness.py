@@ -13,11 +13,11 @@ baseline and for two tiers of our system. Before this module, nothing in the
 repo computed them — they were produced by hand once and transcribed into
 prose, which meant no later change to detection could be shown to have helped.
 
-Two ground-truth definitions
-----------------------------
+Three ground-truth definitions
+------------------------------
 Our system flags *customers*, but the dataset labels *transactions*, so the
-labels have to be lifted to customer level. There are two defensible ways to
-do that and they give very different recall:
+labels have to be lifted to customer level. There is more than one defensible
+way to do that and they give very different recall:
 
   sender_only        — a customer is positive if they SENT at least one
                        labelled transaction (51 of 270). This matches what the
@@ -26,13 +26,40 @@ do that and they give very different recall:
 
   sender_or_receiver — positive if they sent OR received one (114 of 270).
                        The extra 63 are receive-only participants, e.g. the
-                       individual recipients in a fan-out. No rule currently
-                       evaluates inbound behaviour, so these are structurally
+                       individual recipients in a fan-out. Only R7 evaluates
+                       inbound behaviour, so most of these are structurally
                        uncatchable today.
 
-Reporting both is the honest thing to do: the first says how well the system
-does at the job it was built for, the second says how much of the problem that
-job leaves untouched.
+  sender_or_repeat_receiver
+                     — positive if they sent one, or RECEIVED AT LEAST TWO
+                       (84 of 270). The middle ground, and arguably the most
+                       honest target.
+
+Why the third exists
+--------------------
+sender_or_receiver over-labels. 30 of its 63 receive-only positives receive
+exactly ONE labelled transaction, which does not distinguish a participant from
+an ordinary counterparty who happened to be paid once by a launderer. Scoring
+against them measures whether the system can identify people the data gives it
+no evidence about. Requiring repetition keeps the receive-only participants that
+show a *pattern* (33 of them) and drops the incidental ones.
+
+Two candidate spellings of "repeat" were measured and are identical on this
+dataset: at-least-two-inbound-total, and at-least-two-from-a-single-sender (the
+signal R7 keys on). No customer here receives two labelled transactions from two
+different senders, so the two sets coincide exactly. The simpler total-count
+form is implemented; if that ever stops holding on new data the distinction
+would need revisiting, which is what REPEAT_RECEIVER_MIN_TXNS documents.
+
+A third clause was considered and rejected: "or received from a flagged sender".
+It is degenerate here — every labelled transaction's sender is a sender-side
+positive by construction, so the clause selects all 91 receivers and collapses
+straight back into sender_or_receiver.
+
+Reporting all three is the honest thing to do: the first says how well the
+system does at the job it was built for, the second says how much of the problem
+that job leaves untouched, and the third says how much of that gap is actually
+evidenced in the data.
 """
 
 from __future__ import annotations
@@ -52,6 +79,13 @@ DEFAULT_CUST_CSV = _REPO_ROOT / "data" / "sample" / "aml_sample_customers.csv"
 # AML_LOGIC.md §6: the naive comparator the whole false-positive story is told
 # against — "flag any customer who sent a transaction over $9,000".
 NAIVE_THRESHOLD = 9_000.0
+
+# How many labelled inbound transactions make a receiver a *participant* rather
+# than an incidental counterparty, for the sender_or_repeat_receiver definition.
+# 2 is the smallest value that expresses "more than once", which is the whole
+# claim being made — anything higher would be tuning the ground truth to the
+# detector, which is the mistake this definition exists to avoid.
+REPEAT_RECEIVER_MIN_TXNS = 2
 
 
 # ---------------------------------------------------------------------------
@@ -85,25 +119,39 @@ class GroundTruth:
     all_customers: set[str]
     sender_only: set[str]
     sender_or_receiver: set[str]
+    sender_or_repeat_receiver: set[str]
     labelled_txn_count: int
 
     @property
     def receive_only(self) -> set[str]:
         """Positives reachable only through inbound behaviour.
 
-        This set is the recall gap: no current rule or feature evaluates
-        fan-in, so nothing in the system can flag these on their own evidence.
+        This set is the recall gap: only R7 evaluates inbound behaviour, so
+        most of these cannot be flagged on their own evidence.
         """
         return self.sender_or_receiver - self.sender_only
+
+    @property
+    def incidental_receivers(self) -> set[str]:
+        """Receive-only positives with a single labelled inbound transaction.
+
+        The difference between the broad and the repeat-receiver definitions,
+        and the reason the third one exists: one inbound payment does not
+        distinguish a participant from someone a launderer happened to pay
+        once.
+        """
+        return self.sender_or_receiver - self.sender_or_repeat_receiver
 
     def positives(self, definition: str) -> set[str]:
         if definition == "sender_only":
             return self.sender_only
         if definition == "sender_or_receiver":
             return self.sender_or_receiver
+        if definition == "sender_or_repeat_receiver":
+            return self.sender_or_repeat_receiver
         raise ValueError(
-            f"unknown ground-truth definition {definition!r}; "
-            "expected 'sender_only' or 'sender_or_receiver'"
+            f"unknown ground-truth definition {definition!r}; expected "
+            "'sender_only', 'sender_or_receiver' or 'sender_or_repeat_receiver'"
         )
 
 
@@ -130,10 +178,19 @@ def load_ground_truth(
     senders = set(labelled["sender_id"]) & all_customers
     receivers = set(labelled["receiver_id"]) & all_customers
 
+    # Receivers of MORE THAN ONE labelled transaction. value_counts() is over
+    # the raw column, so intersect with the roster afterwards for the same
+    # reason every other set here does.
+    inbound_counts = labelled["receiver_id"].value_counts()
+    repeat_receivers = set(
+        inbound_counts[inbound_counts >= REPEAT_RECEIVER_MIN_TXNS].index
+    ) & all_customers
+
     return df, GroundTruth(
         all_customers=all_customers,
         sender_only=senders,
         sender_or_receiver=senders | receivers,
+        sender_or_repeat_receiver=senders | repeat_receivers,
         labelled_txn_count=int(len(labelled)),
     )
 

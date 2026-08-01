@@ -20,6 +20,7 @@ import pandas as pd
 import pytest
 
 from evaluation.harness import (
+    REPEAT_RECEIVER_MIN_TXNS,
     GroundTruth,
     evaluate,
     load_ground_truth,
@@ -124,7 +125,9 @@ def test_ground_truth_matches_the_documented_counts():
     assert gt.labelled_txn_count == 202
     assert len(gt.sender_only) == 51
     assert len(gt.sender_or_receiver) == 114
+    assert len(gt.sender_or_repeat_receiver) == 84
     assert len(gt.receive_only) == 63
+    assert len(gt.incidental_receivers) == 30
 
 
 def test_receive_only_positives_are_the_documented_recall_gap():
@@ -152,10 +155,96 @@ def test_naive_baseline_flags_almost_everyone():
 
 def test_positives_accessor_rejects_an_unknown_definition():
     gt = GroundTruth(all_customers={"a"}, sender_only=set(),
-                     sender_or_receiver=set(), labelled_txn_count=0)
+                     sender_or_receiver=set(), sender_or_repeat_receiver=set(),
+                     labelled_txn_count=0)
 
     with pytest.raises(ValueError, match="unknown ground-truth definition"):
         gt.positives("receiver_only")
+
+
+# ---------------------------------------------------------------------------
+# The third definition: sender, or received more than once
+# ---------------------------------------------------------------------------
+
+
+def test_repeat_receiver_sits_between_the_other_two():
+    """It is a strict middle ground, not a different axis. Anything the strict
+    definition calls positive must stay positive, and nothing outside the broad
+    definition may appear."""
+    _, gt = load_ground_truth()
+
+    assert gt.sender_only <= gt.sender_or_repeat_receiver <= gt.sender_or_receiver
+    assert len(gt.sender_only) < len(gt.sender_or_repeat_receiver) < len(gt.sender_or_receiver)
+    assert gt.positives("sender_or_repeat_receiver") == gt.sender_or_repeat_receiver
+
+
+def test_the_excluded_receivers_all_have_exactly_one_labelled_inbound():
+    """The claim the definition rests on: what it drops is genuinely incidental.
+
+    Every customer excluded relative to the broad definition must have received
+    exactly one labelled transaction and sent none — otherwise the definition is
+    dropping evidence rather than noise.
+    """
+    df, gt = load_ground_truth()
+    labelled = df[_as_bool(df["label_is_laundering"])]
+    inbound = labelled["receiver_id"].value_counts()
+
+    excluded = gt.incidental_receivers
+    assert len(excluded) == 30
+    for cid in excluded:
+        assert int(inbound.get(cid, 0)) == 1, f"{cid} was excluded but has >1 inbound"
+        assert cid not in gt.sender_only
+
+
+def test_both_spellings_of_repeat_give_the_same_positive_set():
+    """Two spellings of "repeat" were considered: 2+ labelled inbound in total,
+    and 2+ from a single sender (the pair signal R7 keys on).
+
+    Their raw receiver sets are NOT identical — three customers receive two
+    labelled transactions from two different senders. But all three also SEND
+    labelled transactions, so they are sender-side positives already and the
+    two definitions produce the same ground truth. The simpler total-count form
+    is implemented on that basis.
+
+    This is the assertion that matters, and it is deliberately stated over the
+    final positive sets rather than the intermediate receiver sets: the latter
+    differ, and asserting they don't would be pinning a falsehood.
+    """
+    df, gt = load_ground_truth()
+    labelled = df[_as_bool(df["label_is_laundering"])]
+
+    by_total = set(labelled["receiver_id"].value_counts().pipe(
+        lambda s: s[s >= REPEAT_RECEIVER_MIN_TXNS].index)) & gt.all_customers
+    by_pair = {
+        cid for cid, grp in labelled.groupby("receiver_id")
+        if cid in gt.all_customers
+        and grp.groupby("sender_id").size().max() >= REPEAT_RECEIVER_MIN_TXNS
+    }
+
+    assert by_total != by_pair, "if these ever coincide, simplify this test"
+    assert by_total - by_pair <= gt.sender_only, (
+        "the customers the two spellings disagree on must already be sender-side "
+        "positives, or the choice of spelling would change the ground truth"
+    )
+    assert (gt.sender_only | by_total) == (gt.sender_only | by_pair)
+    assert (gt.sender_only | by_total) == gt.sender_or_repeat_receiver
+
+
+def test_received_from_a_flagged_sender_would_be_degenerate():
+    """A third clause was considered and rejected: "or received from a flagged
+    sender". Every labelled transaction's sender is a sender-side positive by
+    construction, so that clause selects every receiver and collapses back into
+    sender_or_receiver. Pinned so nobody re-proposes it."""
+    df, gt = load_ground_truth()
+    labelled = df[_as_bool(df["label_is_laundering"])]
+
+    from_flagged = set(
+        labelled[labelled["sender_id"].isin(gt.sender_only)]["receiver_id"]
+    ) & gt.all_customers
+    all_receivers = set(labelled["receiver_id"]) & gt.all_customers
+
+    assert from_flagged == all_receivers
+    assert gt.sender_only | from_flagged == gt.sender_or_receiver
 
 
 # ---------------------------------------------------------------------------
