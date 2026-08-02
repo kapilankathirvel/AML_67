@@ -177,6 +177,14 @@ The revision is validated as `executed_prefix + proposed_suffix` through the sam
 every rule applies mid-flight for free and V3 prevents re-running a completed step. Capped at
 `MAX_REPLANS = 2`; the executor's three hardcoded rules remain the floor beneath it.
 
+A failed step is an observation too, and originally the loop could not see one: each of the executor's
+three error branches (`unknown tool`, the tool raised, `ok=False`) ended in a `continue` that skipped
+every decision point below it, including this one. Those branches are now folded into `_execute_step`,
+which returns a failure note instead of short-circuiting, and the note leads the digest — a zero in
+`rule hits` means something different after a successful `rule_detect` than after a failed one. Failure
+re-plans draw on a separate `MAX_FAILURE_REPLANS = 1` allowance, because sharing one budget meant the
+routine steps spent it before any failure could use it. Worst case is a constant 3 round trips.
+
 The observation digest must contain the changing counters — `backend/llm/client.py` caches on the exact
 prompt, so a static digest would make iteration 2 replay iteration 1 and loop on the same decision
 forever. `tests/test_replanner.py` pins that the digest changes as a run progresses. `load_data` moved into this category after measurement — it was 8 of 13

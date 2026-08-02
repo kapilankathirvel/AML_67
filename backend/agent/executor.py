@@ -40,85 +40,74 @@ def run_plan(intent: QueryIntent, plan: ExecutionPlan) -> AgentResponse:
     steps = list(plan.steps)
     i = 0
     replans_used = 0
+    failure_replans_used = 0
     while i < len(steps):
         step = steps[i]
-        fn = tools.get(step.tool)
+        result, failure = _execute_step(step, tools, ctx)
 
-        if fn is None:
-            step.status = "error"
-            response.warnings.append(f"unknown tool '{step.tool}' — skipped")
-            i += 1
-            continue
+        # The three hardcoded rules below only make sense after a step that
+        # produced something, so they stay on the success path. The re-planner
+        # does not: a failure is an observation, and the most useful one there
+        # is. See the "Failures are observations too" note in replanner.py.
+        if failure is not None:
+            response.warnings.append(failure)
+        else:
+            if result.df is not None:
+                ctx.df = result.df
+            ctx.artifacts.update(result.artifacts)
+            response.tables.update(result.tables)
+            response.charts.update(result.charts)
+            response.metrics.update(result.metrics)
+            plan.decisions.extend(result.notes)
 
-        t0 = time.perf_counter()
-        try:
-            result = fn(ctx, **step.params)
-        except Exception as exc:  # isolate any tool failure, never let it 500 the API
-            step.status = "error"
-            step.duration_ms = int((time.perf_counter() - t0) * 1000)
-            response.warnings.append(f"{step.tool} raised {type(exc).__name__}: {exc}")
-            i += 1
-            continue
-        step.duration_ms = int((time.perf_counter() - t0) * 1000)
+            if step.tool == "load_data" and ctx.customers is not None and intent.entities:
+                resolved, resolve_notes = _resolve_entities(intent.entities, ctx.customers)
+                # always log resolve_notes (even the no-match case) and keep entity_lookup's
+                # already-built params in sync — not just when resolved != intent.entities,
+                # since an unmatched entity still produced a note worth surfacing
+                intent.entities = resolved
+                plan.decisions.extend(resolve_notes)
+                for later in steps[i + 1:]:
+                    if later.tool == "entity_lookup" and "entity_id" in later.params:
+                        later.params["entity_id"] = intent.entities[0] if intent.entities else None
 
-        if not result.ok:
-            step.status = "error"
-            response.warnings.append(result.error or f"{step.tool} returned ok=False")
-            i += 1
-            continue
+            if step.tool == "filter_data" and ctx.df is not None:
+                if len(ctx.df) == 0:
+                    plan.decisions.append("filter_data returned 0 rows — stopping execution early")
+                    response.summary = "No transactions matched the given filters."
+                    plan.steps = steps
+                    return response
+                if len(ctx.df) < 50:
+                    remaining = steps[i + 1:]
+                    still_has_ml = any(s.tool == "ml_detect" for s in remaining)
+                    if still_has_ml:
+                        steps[i + 1:] = [s for s in remaining if s.tool != "ml_detect"]
+                        plan.decisions.append(
+                            "sample too small for anomaly detection (<50 rows) — skipping ml_detect"
+                        )
 
-        step.status = "ok"
-        if result.df is not None:
-            ctx.df = result.df
-        ctx.artifacts.update(result.artifacts)
-        response.tables.update(result.tables)
-        response.charts.update(result.charts)
-        response.metrics.update(result.metrics)
-        plan.decisions.extend(result.notes)
-
-        if step.tool == "load_data" and ctx.customers is not None and intent.entities:
-            resolved, resolve_notes = _resolve_entities(intent.entities, ctx.customers)
-            # always log resolve_notes (even the no-match case) and keep entity_lookup's
-            # already-built params in sync — not just when resolved != intent.entities,
-            # since an unmatched entity still produced a note worth surfacing
-            intent.entities = resolved
-            plan.decisions.extend(resolve_notes)
-            for later in steps[i + 1:]:
-                if later.tool == "entity_lookup" and "entity_id" in later.params:
-                    later.params["entity_id"] = intent.entities[0] if intent.entities else None
-
-        if step.tool == "filter_data" and ctx.df is not None:
-            if len(ctx.df) == 0:
-                plan.decisions.append("filter_data returned 0 rows — stopping execution early")
-                response.summary = "No transactions matched the given filters."
-                plan.steps = steps
-                return response
-            if len(ctx.df) < 50:
-                remaining = steps[i + 1:]
-                still_has_ml = any(s.tool == "ml_detect" for s in remaining)
-                if still_has_ml:
-                    steps[i + 1:] = [s for s in remaining if s.tool != "ml_detect"]
-                    plan.decisions.append(
-                        "sample too small for anomaly detection (<50 rows) — skipping ml_detect"
-                    )
-
-        if step.tool == "rule_detect":
-            hits = ctx.artifacts.get("rule_hits", [])
-            already_planned = any(s.tool == "ml_detect" for s in steps[i + 1:])
-            if not hits and not already_planned:
-                steps.insert(i + 1, ToolCall(tool="ml_detect", reason="no rule hits — widening to ML anomaly detection"))
-                plan.decisions.append("no rule hits — widening the net with ml_detect")
+            if step.tool == "rule_detect":
+                hits = ctx.artifacts.get("rule_hits", [])
+                already_planned = any(s.tool == "ml_detect" for s in steps[i + 1:])
+                if not hits and not already_planned:
+                    steps.insert(i + 1, ToolCall(tool="ml_detect", reason="no rule hits — widening to ML anomaly detection"))
+                    plan.decisions.append("no rule hits — widening the net with ml_detect")
 
         # Observe -> decide -> act. Runs AFTER the three rules above, which
         # remain the floor: if the model declines or proposes something
         # illegal, behaviour is exactly what it was before this existed.
         # Placed here so the model sees the result of the step that just ran,
-        # including any adjustment those rules just made.
-        if (
-            settings.aml_llm_replanner
-            and replans_used < replanner.MAX_REPLANS
-            and i + 1 < len(steps)
-        ):
+        # including any adjustment those rules just made, and — when that step
+        # errored — the failure itself.
+        # Failures draw on their own reserved allowance — see MAX_FAILURE_REPLANS.
+        # Sharing one budget meant the routine steps spent it before any failure
+        # could use it, which left the loop blind in practice.
+        budget_left = (
+            failure_replans_used < replanner.MAX_FAILURE_REPLANS
+            if failure is not None
+            else replans_used < replanner.MAX_REPLANS
+        )
+        if settings.aml_llm_replanner and budget_left and i + 1 < len(steps):
             revised = replanner.replan(
                 intent=intent,
                 plan=plan,
@@ -126,8 +115,12 @@ def run_plan(intent: QueryIntent, plan: ExecutionPlan) -> AgentResponse:
                 executed=steps[: i + 1],
                 remaining=steps[i + 1:],
                 tools=tools,
+                failure=failure,
             )
-            replans_used += 1
+            if failure is not None:
+                failure_replans_used += 1
+            else:
+                replans_used += 1
             if revised is not None:
                 steps[i + 1:] = revised
 
@@ -161,6 +154,41 @@ def run_plan(intent: QueryIntent, plan: ExecutionPlan) -> AgentResponse:
     response.charts = _sanitize_for_json(response.charts)
     response.metrics = _sanitize_for_json(response.metrics)
     return response
+
+
+def _execute_step(step: ToolCall, tools: dict[str, Any], ctx: ToolContext) -> tuple[Any, str | None]:
+    """Run one step. Returns (result, failure_note); exactly one is meaningful.
+
+    Collapses the three ways a step can fail — no such tool, the tool raised,
+    the tool returned ok=False — into a single value the caller handles in one
+    place. That is what lets the re-planner see failures: each of these was
+    previously a `continue` in the main loop, which skipped every decision
+    point below it, including the one whose entire job is deciding what to do
+    when something goes wrong.
+
+    The failure strings are unchanged from those three branches, because they
+    are already surfaced to the user as `response.warnings`.
+    """
+    fn = tools.get(step.tool)
+    if fn is None:
+        step.status = "error"
+        return None, f"unknown tool '{step.tool}' — skipped"
+
+    t0 = time.perf_counter()
+    try:
+        result = fn(ctx, **step.params)
+    except Exception as exc:  # isolate any tool failure, never let it 500 the API
+        step.status = "error"
+        step.duration_ms = int((time.perf_counter() - t0) * 1000)
+        return None, f"{step.tool} raised {type(exc).__name__}: {exc}"
+    step.duration_ms = int((time.perf_counter() - t0) * 1000)
+
+    if not result.ok:
+        step.status = "error"
+        return None, result.error or f"{step.tool} returned ok=False"
+
+    step.status = "ok"
+    return result, None
 
 
 def _sanitize_for_json(obj: Any) -> Any:

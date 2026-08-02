@@ -23,6 +23,18 @@ V4 (`load_data` first), V5-V7 (dependencies), V12 (the terminal tool still
 present) and V14 (capabilities the model may not reach) all apply to a
 mid-flight revision for free, with no second implementation to drift.
 
+Failures are observations too
+-----------------------------
+The first version of this module only ever ran after a step that succeeded:
+the executor's three error paths each `continue`d straight past the call. That
+made the loop blind in exactly the situation it is most useful for — a step
+just died, and everything queued behind it depends on output that now does not
+exist. A failed `rule_detect` is the clearest case: `risk_classify` is still
+queued with nothing to classify, the hardcoded "no rule hits -> add ml_detect"
+rule cannot fire because it lives on the success path, and `ml_detect` is still
+a legal, useful revision. The failure note is now passed in and leads the
+digest.
+
 Relationship to the executor's three hardcoded rules
 ----------------------------------------------------
 They stay, underneath this, exactly as `planner.build_plan` sits underneath
@@ -55,6 +67,15 @@ from backend.tools.base import ToolContext
 # queries already reach ~47s against a 60s ceiling.
 MAX_REPLANS = 2
 
+# Failures get their own reserved allowance rather than sharing the one above.
+# Measured while adding failure observation: on a five-step plan the routine
+# budget is spent on the first two (successful) steps, so a failure at step
+# four found nothing left and the loop stayed blind in practice even though it
+# could now see. The cap exists to bound latency and guarantee termination, and
+# one extra round trip on a path that is rare by definition costs neither:
+# worst case is MAX_REPLANS + MAX_FAILURE_REPLANS calls, still a constant.
+MAX_FAILURE_REPLANS = 1
+
 _SCHEMA_HINT = (
     'Return JSON: {"revise": true|false, "steps": [{"tool": "<name>", "params": {}, '
     '"reason": "<why this tool, given what was just observed>"}]}. '
@@ -63,17 +84,29 @@ _SCHEMA_HINT = (
 )
 
 
-def observe(ctx: ToolContext, executed: list[str], remaining: list[str]) -> str:
+def observe(
+    ctx: ToolContext,
+    executed: list[str],
+    remaining: list[str],
+    failure: str | None = None,
+) -> str:
     """A compact factual digest of what has actually happened so far.
 
     Deliberately counts and names only. Feeding rows or entity IDs to the model
     would invite it to reason about individual customers, which is the rules'
     job and is where a hallucinated number would do real damage.
+
+    `failure` is the note from a step that just errored. It leads the digest
+    because it changes what the rest of the observation means: a zero in
+    `rule hits` after a successful `rule_detect` is a finding, whereas the same
+    zero after a failed one is just an artifact that was never written.
     """
     lines = [
         f"steps already run: {' -> '.join(executed) or '(none)'}",
         f"steps still queued: {' -> '.join(remaining) or '(none)'}",
     ]
+    if failure:
+        lines.insert(0, f"THE STEP THAT JUST RAN FAILED: {failure}")
 
     df = ctx.df
     lines.append(f"working rows: {0 if df is None else len(df)}")
@@ -110,8 +143,28 @@ def _build_prompt(
     digest: str,
     remaining: list[ToolCall],
     tools: dict[str, Callable],
+    failure: str | None = None,
 ) -> str:
     queued = " -> ".join(s.tool for s in remaining) or "(nothing)"
+    # The default advice ("keeping the plan is usually correct") is calibrated
+    # for the happy path, where the queued steps still make sense. After a
+    # failure it points the wrong way, so it is replaced rather than softened.
+    guidance = (
+        "Decide whether the remaining steps should change in light of the "
+        "observation above. Keeping the plan is usually correct — revise only "
+        "when the observation shows the queued steps will not answer the "
+        "query. "
+        if not failure
+        else (
+            "The step that just ran FAILED, so any queued step that needed its "
+            "output will fail too. Revising is more likely to be right here "
+            "than it usually is: prefer a route to the same answer that does "
+            "not depend on what failed. Keep the plan only if the queued steps "
+            "genuinely do not need the failed step's output. Note that a step "
+            "which has already run cannot be run again, including the one that "
+            "failed. "
+        )
+    )
     return (
         "You are part-way through executing a plan for an AML compliance query, "
         "and you can now see what the steps so far actually produced.\n\n"
@@ -122,10 +175,8 @@ def _build_prompt(
         f"STEPS STILL QUEUED: {queued}\n\n"
         "AVAILABLE TOOLS:\n"
         f"{render_catalog(tools)}\n\n"
-        "Decide whether the remaining steps should change in light of the "
-        "observation above. Keeping the plan is usually correct — revise only "
-        "when the observation shows the queued steps will not answer the "
-        "query. If you revise, return the FULL replacement list for the "
+        f"{guidance}"
+        "If you revise, return the FULL replacement list for the "
         "remaining steps (not the steps that already ran).\n"
         "The same rules apply as when the plan was built: feature_engineer "
         "before rule_detect and ml_detect, risk_classify after a detector, no "
@@ -140,6 +191,7 @@ def replan(
     executed: list[ToolCall],
     remaining: list[ToolCall],
     tools: dict[str, Callable],
+    failure: str | None = None,
 ) -> list[ToolCall] | None:
     """Ask the model whether to revise the queued steps. None = keep them.
 
@@ -148,14 +200,23 @@ def replan(
     validation. Every outcome is written to `plan.decisions` with a
     `replanner:` prefix, so declining and failing are distinguishable in the
     audit trail rather than both looking like silence.
+
+    `failure` is set when the step that just ran errored. That is the case this
+    loop is most useful for and the one it could not originally see, because
+    the executor's error paths skipped past it — see the note in executor.py.
     """
     digest = observe(
         ctx,
         [s.tool for s in executed],
         [s.tool for s in remaining],
+        failure=failure,
     )
+    if failure:
+        plan.decisions.append(f"replanner: observing a failed step — {failure}")
 
-    raw = complete_json(_build_prompt(intent, digest, remaining, tools), _SCHEMA_HINT)
+    raw = complete_json(
+        _build_prompt(intent, digest, remaining, tools, failure=failure), _SCHEMA_HINT
+    )
     if raw is None:
         plan.decisions.append("replanner: no usable response — keeping the current plan")
         return None
@@ -197,8 +258,13 @@ def replan(
     return suffix
 
 
-def digest_for_tests(ctx: ToolContext, executed: list[str], remaining: list[str]) -> str:
+def digest_for_tests(
+    ctx: ToolContext,
+    executed: list[str],
+    remaining: list[str],
+    failure: str | None = None,
+) -> str:
     """Public alias so tests can assert on the observation without importing a
     private name. The digest's contents are load-bearing: they are what makes
     each iteration's prompt distinct and therefore cache-missing."""
-    return observe(ctx, executed, remaining)
+    return observe(ctx, executed, remaining, failure=failure)

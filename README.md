@@ -253,7 +253,16 @@ Three properties make it safe to turn on:
   implementation to drift.
 - **The three hardcoded runtime rules stay underneath it**, exactly as `build_plan` sits under
   `plan_query`. Model declines or proposes something illegal → behaviour is what it was before.
-- **It is capped at 2 interventions per request** and defaults off.
+- **It is capped at 2 routine interventions per request**, plus 1 reserved for failures, and defaults off.
+
+**It observes failures, not just successes.** The first version ran only after a step that succeeded —
+the executor's three error paths each `continue`d straight past it — which left it blind in the one
+situation it exists for. A failed `rule_detect` is the clearest case: `risk_classify` is still queued
+with nothing to classify, and the hardcoded "0 rule hits → append `ml_detect`" rule cannot help because
+it lives on the success path. Falling back to `ml_detect` is legal, useful, and reachable only by the
+loop. The failure allowance is separate for a measured reason: on a five-step plan the routine budget is
+spent by step two, so a failure at step four found nothing left and the loop stayed blind in practice
+even after it could see.
 
 **Measured, and the result is a negative one worth reporting.** Five queries through the full pipeline
 with a hosted model, loop on versus off: it produced decisions on 5/5 queries and **declined to revise on

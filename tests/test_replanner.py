@@ -12,9 +12,9 @@ import backend.agent.executor as executor_mod
 import backend.agent.replanner as replanner_mod
 from backend.agent.executor import _get_tools, run_plan
 from backend.agent.planner import build_plan
-from backend.agent.replanner import MAX_REPLANS, observe
+from backend.agent.replanner import MAX_FAILURE_REPLANS, MAX_REPLANS, observe
 from backend.config import settings
-from backend.schemas import QueryIntent
+from backend.schemas import QueryIntent, ToolCall
 from backend.tools.base import ToolContext, ToolResult
 
 
@@ -232,6 +232,184 @@ def test_replanning_is_capped(monkeypatch):
     _run()
 
     assert calls["n"] <= MAX_REPLANS, f"expected at most {MAX_REPLANS} re-plans, got {calls['n']}"
+
+
+# ---------------------------------------------------------------------------
+# Failures are observations too
+#
+# The loop originally ran only after a step that succeeded: each of the
+# executor's three error paths `continue`d straight past it. That made it blind
+# in the one situation it exists for.
+# ---------------------------------------------------------------------------
+
+
+def _boom(*a, **kw):
+    raise RuntimeError("synthetic tool failure")
+
+
+def _capture_prompts(monkeypatch, payload=None):
+    """Collect every prompt, not just the first. The loop is consulted after
+    each step, so the failure prompt is not the earliest one."""
+    seen: list[str] = []
+
+    def spy(prompt, schema_hint=""):
+        seen.append(prompt)
+        return payload
+
+    monkeypatch.setattr(replanner_mod, "complete_json", spy)
+    return seen
+
+
+def test_digest_leads_with_the_failure():
+    digest = observe(ToolContext(df=None), ["load_data"], ["risk_classify"],
+                     failure="rule_detect raised RuntimeError: boom")
+    assert digest.splitlines()[0].startswith("THE STEP THAT JUST RAN FAILED:")
+    assert "rule_detect raised RuntimeError: boom" in digest
+
+
+def test_digest_has_no_failure_line_on_the_happy_path():
+    digest = observe(ToolContext(df=None), ["load_data"], ["risk_classify"])
+    assert "FAILED" not in digest
+
+
+def test_a_raising_tool_still_reaches_the_replanner(monkeypatch):
+    """The regression this whole change is about."""
+    monkeypatch.setattr(settings, "aml_llm_replanner", True)
+    seen = _capture_prompts(monkeypatch, {"revise": False})
+    monkeypatch.setitem(_get_tools(), "rule_detect", _boom)
+
+    plan, response = _run()
+
+    assert any("synthetic tool failure" in p for p in seen), \
+        "the re-planner was never told the step had failed"
+    assert any("synthetic tool failure" in w for w in response.warnings)
+
+
+def test_the_failure_is_written_to_the_audit_trail(monkeypatch):
+    monkeypatch.setattr(settings, "aml_llm_replanner", True)
+    _stub(monkeypatch, {"revise": False})
+    monkeypatch.setitem(_get_tools(), "rule_detect", _boom)
+
+    plan, _ = _run()
+    assert "replanner: observing a failed step — rule_detect raised RuntimeError" in _decisions(plan)
+
+
+def test_a_tool_returning_not_ok_also_reaches_the_replanner(monkeypatch):
+    monkeypatch.setattr(settings, "aml_llm_replanner", True)
+    seen = _capture_prompts(monkeypatch, {"revise": False})
+    monkeypatch.setitem(
+        _get_tools(), "rule_detect",
+        lambda ctx, **kw: ToolResult(ok=False, error="rule_detect could not run"),
+    )
+
+    _run()
+    assert any("rule_detect could not run" in p for p in seen)
+
+
+def test_an_unknown_tool_also_reaches_the_replanner(monkeypatch):
+    monkeypatch.setattr(settings, "aml_llm_replanner", True)
+    seen = _capture_prompts(monkeypatch, {"revise": False})
+
+    intent = _intent()
+    plan = build_plan(intent)
+    plan.steps.insert(1, ToolCall(tool="no_such_tool", reason="deliberately bogus"))
+    run_plan(intent, plan)
+
+    assert any("unknown tool 'no_such_tool'" in p for p in seen)
+
+
+def test_the_model_can_route_around_a_failed_detector(monkeypatch):
+    """The concrete win. rule_detect dies, so risk_classify is queued with
+    nothing to classify, and the hardcoded 'no rule hits -> add ml_detect' rule
+    cannot help because it lives on the success path. ml_detect is still a legal
+    and useful revision, and only the loop can reach it."""
+    monkeypatch.setattr(settings, "aml_llm_replanner", True)
+    revision = {"revise": True, "steps": [
+        {"tool": "ml_detect", "params": {}, "reason": "rule_detect failed — fall back to anomaly detection"},
+        {"tool": "risk_classify", "params": {}, "reason": "score what ml_detect found"},
+    ]}
+    # Revise only when told something failed; keep the plan otherwise. That is
+    # the behaviour being tested, and it also keeps the earlier happy-path
+    # consultations from reshaping the plan before rule_detect can fail.
+    monkeypatch.setattr(
+        replanner_mod, "complete_json",
+        lambda prompt, schema_hint="": revision if "JUST RAN FAILED" in prompt else {"revise": False},
+    )
+
+    intent = _intent()
+    plan = build_plan(intent)
+    plan.steps = [s for s in plan.steps if s.tool != "ml_detect"]
+    monkeypatch.setitem(_get_tools(), "rule_detect", _boom)
+    run_plan(intent, plan)
+
+    assert "replanner: revised the remaining plan" in _decisions(plan)
+    assert "ml_detect" in [s.tool for s in plan.steps]
+
+
+def test_the_failure_allowance_survives_a_spent_routine_budget(monkeypatch):
+    """rule_detect is the fourth step, so MAX_REPLANS is already gone by the
+    time it fails. Without a reserved allowance the loop would see the failure
+    and have no budget left to act on it — which is how it behaved when the
+    two budgets were shared."""
+    monkeypatch.setattr(settings, "aml_llm_replanner", True)
+    seen = _capture_prompts(monkeypatch, {"revise": False})
+    monkeypatch.setitem(_get_tools(), "rule_detect", _boom)
+
+    _run()
+
+    routine = [p for p in seen if "JUST RAN FAILED" not in p]
+    failed = [p for p in seen if "JUST RAN FAILED" in p]
+    assert len(routine) == MAX_REPLANS, "the routine budget should have been spent first"
+    assert failed, "the failure got no consultation once the routine budget ran out"
+
+
+def test_failure_replans_are_capped_too(monkeypatch):
+    """The reserved allowance is an allowance, not an exemption."""
+    monkeypatch.setattr(settings, "aml_llm_replanner", True)
+    seen = _capture_prompts(monkeypatch, {"revise": False})
+    for tool in ("feature_engineer", "rule_detect", "ml_detect"):
+        monkeypatch.setitem(_get_tools(), tool, _boom)
+
+    _run()
+
+    failed = [p for p in seen if "JUST RAN FAILED" in p]
+    assert len(failed) <= MAX_FAILURE_REPLANS, \
+        f"expected at most {MAX_FAILURE_REPLANS} failure re-plans, got {len(failed)}"
+
+
+def test_a_failure_does_not_change_behaviour_with_the_flag_off(monkeypatch):
+    """The failure paths must stay exactly as they were by default."""
+    monkeypatch.setattr(settings, "aml_llm_replanner", False)
+    monkeypatch.setattr(replanner_mod, "complete_json",
+                        lambda *a, **kw: pytest.fail("consulted the LLM with the flag off"))
+    monkeypatch.setitem(_get_tools(), "rule_detect", _boom)
+
+    intent = _intent()
+    baseline = [s.tool for s in build_plan(intent).steps]
+    plan, response = _run(intent)
+
+    assert "replanner:" not in _decisions(plan)
+    assert [s.tool for s in plan.steps] == baseline
+    assert any("rule_detect raised RuntimeError" in w for w in response.warnings)
+
+
+def test_a_failed_step_is_still_marked_error(monkeypatch):
+    """Refactoring the three error branches into one helper must not lose the
+    per-step status the frontend's trace renders."""
+    monkeypatch.setattr(settings, "aml_llm_replanner", False)
+    monkeypatch.setitem(_get_tools(), "rule_detect", _boom)
+    plan, _ = _run()
+
+    failed = [s for s in plan.steps if s.tool == "rule_detect"]
+    assert failed and all(s.status == "error" for s in failed)
+
+
+def test_the_run_still_completes_after_a_failure(monkeypatch):
+    """A failing step must not abort the request — unchanged from before."""
+    monkeypatch.setattr(settings, "aml_llm_replanner", False)
+    monkeypatch.setitem(_get_tools(), "rule_detect", _boom)
+    _, response = _run()
+    assert response.summary
 
 
 def test_the_hardcoded_rules_still_fire_underneath(monkeypatch):
