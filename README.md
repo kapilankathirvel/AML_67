@@ -617,6 +617,97 @@ LOW band. Recall, the HIGH tier, and every rule-driven flag are unchanged. The r
 rather than tuned away — the alternative was shipping a feature that contradicts its own name and
 [AML_LOGIC.md](docs/AML_LOGIC.md) §3 R5 in order to protect a metric.
 
+### Ablation: which components actually earn their place
+
+Every number above describes the system as a whole. None of them say which *parts* of it are doing the
+work — and the hybrid design, the 0.6/0.4 fusion split, the 70/40/15 bands and all seven rules were each
+chosen up front and never individually measured. Regenerate with:
+
+```bash
+python -m evaluation.ablation
+```
+
+The detection stack runs once; every configuration below is produced by re-fusing the same captured
+`rule_hits` and `ml_scores` through the real `risk_classify`, so a difference between rows can only come
+from the thing being ablated. Scored sender-side unless stated.
+
+**Components.**
+
+| Configuration | Flagged | HIGH | Precision | Recall | F1 |
+|---|---|---|---|---|---|
+| Naive baseline | 259 / 270 | — | 0.197 | 1.000 | 0.329 |
+| Rules only | 36 / 270 | **0** | 0.583 | 0.412 | 0.483 |
+| ML only | 13 / 270 | **0** | 0.692 | 0.176 | 0.281 |
+| Hybrid — shipped | 41 / 270 | 27 | 0.561 | 0.451 | 0.500 |
+
+Two things worth saying out loud. **The hybrid is less precise than either component alone** (0.561 vs
+0.583 and 0.692) — it takes the union of their flags, so it inherits both sets of false positives. It wins
+on recall and F1, which is the trade being made, but "hybrid is better" is too coarse a claim to defend.
+
+**Neither component alone produces a single HIGH flag**, and that is structural rather than a property of
+this dataset: the largest rule weight is R1 at 0.85, so rules-only tops out at `0.6 × 0.85 × 100 = 51`,
+and ML-only at `0.4 × 1.0 × 100 = 40`. Both sit below the HIGH band of 70. **The SAR-drafting tier is
+arithmetically unreachable without corroboration from both signals** — which is a defensible design for a
+compliance system, but was never a stated one. A test now pins it.
+
+**Per rule.** Alone answers "is it precise?"; leave-one-out answers "does it catch anything the others
+miss?". Both are needed — a rule can score perfectly alone and contribute nothing marginally.
+
+| Rule | Hits | Prec. alone | ΔPrec. if removed | ΔRecall if removed | Prec. alone (repeat-recv) | ΔPrec. repeat | ΔRecall repeat |
+|---|---|---|---|---|---|---|---|
+| R1 structuring | 11 | 1.000 | −0.075 | −0.118 | 1.000 | −0.029 | −0.071 |
+| R2 smurfing | 3 | 1.000 | +0.000 | +0.000 | 1.000 | +0.000 | +0.000 |
+| R3 layering | 4 | **0.000** | **+0.061** | +0.000 | **0.000** | **+0.090** | +0.000 |
+| R4 rapid cashout | 8 | 1.000 | −0.106 | −0.157 | 1.000 | −0.041 | −0.095 |
+| R5 velocity | 0 | — | +0.000 | +0.000 | — | +0.000 | +0.000 |
+| R6 dormant | 0 | — | +0.000 | +0.000 | — | +0.000 | +0.000 |
+| R7 inbound structuring | 11 | 0.000 | +0.181 | +0.000 | **1.000** | **−0.055** | **−0.119** |
+
+- **R1 and R4 carry the system.** Perfect precision alone, and removing either costs both precision and
+  recall — they are the only two rules that are individually load-bearing.
+- **R3 (layering) is the one genuinely underperforming rule.** 4 hits, **zero true positives under every
+  definition**, and removing it *improves* precision by 0.061 sender-side and 0.090 repeat-receiver at no
+  recall cost whatsoever. It is kept because the layering typology is real and 4 hits is far too small a
+  sample to retire a rule on — but it is not currently earning its place, and that is now on the record
+  rather than hidden inside an aggregate.
+- **R2 is redundant, not wrong.** Perfect precision alone, exactly zero marginal contribution: all three of
+  its entities are already caught by other rules.
+- **R7 is the trap this table exists to avoid.** Sender-side it looks like the worst rule in the system —
+  precision 0.000, and deleting it gains 0.181 precision. It is receiver-side by design, so under that
+  definition it is *arithmetically incapable* of a true positive. Under the repeat-receiver definition it
+  has **precision 1.000** and removing it costs 0.055 precision and 0.119 recall. Reporting only the
+  sender-side column would have justified deleting one of the better rules in the system.
+
+**Fusion weights.** `RULE_WEIGHT_COEFF` swept 0.0 → 1.0:
+
+| Rule coeff | 0.0 | 0.2 | 0.4 | **0.6** | 0.8 | 1.0 |
+|---|---|---|---|---|---|---|
+| Flagged | 41 | 41 | 41 | **41** | 41 | 41 |
+| Precision | 0.561 | 0.561 | 0.561 | **0.561** | 0.561 | 0.561 |
+| Recall | 0.451 | 0.451 | 0.451 | **0.451** | 0.451 | 0.451 |
+| HIGH count | 30 | 32 | 27 | **27** | 29 | 36 |
+
+**The fusion split cannot affect precision or recall at all** — not weakly, exactly. Membership in
+`risk_rows` is decided by the entity universe (*has a rule hit, or an ML percentile above the 0.95 floor*),
+which never consults the coefficients; they only redistribute severity inside a fixed set. So 0.6/0.4 is
+purely a **banding** decision, and any claim that it was tuned for detection quality would be false. The
+HIGH count does move, non-monotonically, which is the only thing worth tuning it against.
+
+**HIGH-band threshold.** The constant that gates SAR drafting:
+
+| Threshold | 50 | 60 | 65 | **70** | 75 | 80 | 85 |
+|---|---|---|---|---|---|---|---|
+| HIGH flagged | 33 | 30 | 29 | **27** | 25 | 17 | 8 |
+| Precision | 0.636 | 0.700 | 0.724 | **0.778** | 0.840 | 0.941 | 1.000 |
+| Recall | 0.412 | 0.412 | 0.412 | **0.412** | 0.412 | 0.314 | 0.157 |
+| F1 | 0.500 | 0.519 | 0.525 | **0.538** | **0.553** | 0.471 | 0.271 |
+
+**75 dominates 70 on this data** — higher precision (0.840 vs 0.778), higher F1 (0.553 vs 0.538), and
+*identical* recall, because the two flags it drops are both false positives. The threshold is left at 70
+regardless: moving it would be tuning a published constant against the same 270-customer set it is
+evaluated on, which is the circularity this study exists to expose rather than exploit. It is worth
+revisiting on the IBM data, where the tuning set and the evaluation set can differ.
+
 ## Limitations
 
 - **LLM path is provider-agnostic (Gemini, OpenAI, Groq, or local Ollama) and always has a working
