@@ -1,7 +1,7 @@
 # AML_LOGIC.md — Domain Logic, Rule Definitions, and Business Justification
 
 **Owner:** Track B  
-**Last updated:** 2026-07-25  
+**Last updated:** 2026-08-03  
 **Read by:** `backend/tools/rules.py`, `backend/tools/features.py`, Track A's narrator templates
 
 This document is the single source of truth for every rule threshold, business justification, and
@@ -34,9 +34,12 @@ to transactions exhibiting layering, smurfing, or structuring patterns. FATF exp
 - Immediate cash withdrawal after a large electronic receipt (rapid cashout)
 
 ### 1.3 Suspicious Activity Reports (SARs)
-US banks file a SAR (FinCEN Form 114) for any transaction or pattern suspected to involve money
+US banks file a SAR (**FinCEN Form 111**) for any transaction or pattern suspected to involve money
 laundering, regardless of amount. The AML agent generates a SAR draft only for `risk_level=high`
 flags — consistent with the threshold in CONTRACTS.md Contract 5.
+
+For reference, since the three are easy to confuse: **Form 111** is the SAR, **Form 112** is the CTR
+described in §1.1, and Form 114 is the FBAR (foreign account report), which is unrelated to either.
 
 ---
 
@@ -49,11 +52,29 @@ flags — consistent with the threshold in CONTRACTS.md Contract 5.
 | 15–39 | `low` | `monitor` | Weak or single-signal hit → enhanced monitoring, no case opened |
 | < 15 | `none` | `no_action` | Baseline behaviour — no action warranted |
 
-**Rule weight normalisation:** A single rule hit at its maximum weight (1.0) produces
-`risk_score = 100 × 0.6 × 1.0 = 60` → medium. Two corroborating rules at 0.85 and 0.75
-normalise to `(0.85 + 0.75) / 2 = 0.80` → `100 × 0.6 × 0.80 = 48` → medium, reaching high
-only when ML pushes the combined score above 70. This is intentional: a rule alone reaches
-medium but not high; high requires at least a moderate ML anomaly score.
+**Rule weight normalisation:** `normalized_rule_weight` is the **maximum** weight across the rules
+that fired on an entity, not their mean — see `backend/tools/risk.py`, which takes
+`max(hit.weight)`. Multiple hits are all surfaced in the evidence, but they do not compound the
+score; a customer triggering R1 and R3 is more suspicious, and that is expressed by the evidence
+list rather than by inflating the number.
+
+The heaviest rule is R1 at 0.85, so a rule-only score cannot exceed:
+
+```
+100 × 0.6 × 0.85 = 51   → medium
+```
+
+Two corroborating rules at 0.85 and 0.75 give `max = 0.85`, so also **51** — the second rule adds
+evidence, not score. An ML-only entity cannot exceed `100 × 0.4 × 1.0 = 40`, also medium.
+
+**Neither half of the system can produce a HIGH flag on its own**, and that is arithmetic rather than
+a tuning choice: with R1's 0.85, reaching 70 requires an ML percentile of at least
+`(0.70 − 0.51) / 0.4 = 0.475`. The SAR-drafting tier is therefore unreachable without corroboration
+from both signals, which is the intended design — a single rule reaches an analyst's review queue,
+never an automatic filing. This was later confirmed empirically: the component ablation
+(`evaluation/ablation.py`) records 0 HIGH flags for rules-only and 0 for ML-only, against 27 for the
+hybrid. `tests/test_ablation.py` pins it so that retuning a rule weight cannot silently remove the
+property.
 
 ---
 

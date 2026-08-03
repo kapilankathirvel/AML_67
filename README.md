@@ -49,8 +49,9 @@ explainable enough for a human analyst to trust and act on.
 - **Rapid cash-out**: converting an inbound electronic transfer to physical cash quickly — laundering's
   integration stage.
 - **FATF 40 Recommendations** (1, 3, 10) require enhanced due diligence on exactly these patterns.
-- **SARs** (Suspicious Activity Reports, FinCEN Form 114) are filed regardless of amount when laundering
-  is suspected — our agent drafts one automatically for every `HIGH`-risk flag.
+- **SARs** (Suspicious Activity Reports, FinCEN Form 111) are filed regardless of amount when laundering
+  is suspected — our agent drafts one automatically for every `HIGH`-risk flag. The CTR above is Form 112;
+  Form 114 is the unrelated FBAR.
 
 Full regulatory citations, per-rule thresholds, and business justification: **[AML_LOGIC.md](docs/AML_LOGIC.md)**.
 
@@ -736,8 +737,13 @@ revisiting on the IBM data, where the tuning set and the evaluation set can diff
   across a risk band; the same filters now produce zero drift, pinned by
   `tests/test_ml.py::TestPercentileReferencePopulation`.
 - **Detection is overwhelmingly sender-side, and the remaining receiver-side gap is structural.** R7 is
-  the one receiver-keyed rule; every other rule and all 17 features evaluate outbound behaviour. Of the 63
-  customers who appear only as receivers of labelled transactions, R7 recovers 12 and 51 remain
+  the one receiver-keyed rule, and 16 of the 18 feature columns are computed per *sender* — only
+  `rapid_cashout_ratio` and `pass_through_ratio` consult inbound flows at all. The gap is not that these
+  customers are missing from the analysis: all 270 enter the feature frame and all 270 receive an ML
+  score. It is that **what the features measure about them is unremarkable.** The 63 receive-only
+  positives have a median ML percentile of **0.486** — dead centre of the population — and only 2 clear
+  the 0.95 floor, because the only suspicious thing about them is what they *received*, and almost
+  nothing in the feature set describes that. Of those 63, R7 recovers 12 and 51 remain
   unreachable. That is not a missing-rule problem: we tested the obvious fix and it fails. A classic
   fan-in ("funnel account") rule cannot discriminate here — receive-only positives average 7.6 distinct
   inbound counterparties versus a population average of 6.9, and in any 48-hour window both peak at 4.
