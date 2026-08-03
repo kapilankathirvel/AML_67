@@ -299,8 +299,15 @@ flowchart LR
     N --> R(["Risk-scored flags<br/>and the plan that produced them"])
 ```
 
+**One pass through the whole system, layer by layer — what each part does, why it was built that way,
+what was measured, and what is honestly wrong with it: [PROJECT_GUIDE.md](docs/PROJECT_GUIDE.md).**
+The best starting point if you are reading this repo for the first time.
+
 **Full technical documentation — architecture, analysis algorithms, and UI design in one place:
 [DOCUMENTATION.md](docs/DOCUMENTATION.md).**
+
+What changed between the hackathon submission and this repository, and why:
+**[AFTER_THE_DEADLINE.md](docs/AFTER_THE_DEADLINE.md)**.
 
 Component detail, the full Pydantic contract, and sequence diagrams: **[ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
 The frozen interface both halves of this project are built against: **[docs/CONTRACTS.md](docs/CONTRACTS.md)**.
