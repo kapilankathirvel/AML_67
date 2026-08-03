@@ -125,9 +125,32 @@ from an old determinism check and are deliberately not committed.
    |---|---|
    | **Python version** | **3.11** |
 
-   3.11 is what the repo is developed and CI-tested against. Leaving it on a different version is the
-   single most likely cause of a dependency failing to install, because the pinned versions in
-   `requirements.txt` were resolved for 3.11.
+   > ### ⚠️ Do not skip this. It is the one step that has actually broken a real deploy.
+   >
+   > Community Cloud's default is whatever is newest — a first attempt at this app landed on
+   > **Python 3.14.6** and the build failed. It only lets you choose the version **when the app is
+   > created**; there is no way to change it afterwards. Getting it wrong means deleting the app and
+   > starting this section again.
+   >
+   > The failure is also thoroughly misleading, so it is worth recognising. The error is:
+   >
+   > ```
+   > The headers or library files could not be found for zlib,
+   > a required dependency when compiling Pillow from source.
+   > ```
+   >
+   > That sends you looking for missing system libraries, which is a dead end — you cannot install
+   > system packages on Community Cloud anyway. **zlib is not the problem.** The problem is three
+   > lines earlier in the log: `Using Python 3.14.6 environment`. `pandas==2.2.3` and the `pillow`
+   > that `streamlit==1.39.0` depends on publish no prebuilt wheels for 3.14, so pip fell back to
+   > *compiling them from source*, and compiling pillow needs zlib headers the container does not
+   > have.
+   >
+   > On 3.11 all of them install as prebuilt wheels and no compiler is involved. Nothing is wrong
+   > with the code or the dependency list.
+   >
+   > **If 3.11 is not in the dropdown, choose 3.12** — pandas 2.2.3 and pillow both ship 3.12 wheels.
+   > Do not accept 3.13 or 3.14.
 
 5. **Do not click Deploy yet.** The Advanced settings panel also contains the **Secrets** box, and it
    is much less annoying to fill that in now than to fix a broken first boot. Go to
@@ -135,11 +158,10 @@ from an old determinism check and are deliberately not committed.
 
 ### A note on the requirements file
 
-Community Cloud **auto-detects** your dependency file. It does not, as far as I can determine, offer a
-field to choose one by name — I could not verify its server-side behaviour from this repo, so treat
-this section as the thing most likely to need a small adjustment on the day.
+Community Cloud **auto-detects** your dependency file and offers no field to name one. Confirmed from
+a real build log, which read `/mount/src/aml_67/requirements.txt`.
 
-What it will find is **`requirements.txt`** in the repo root. That works. It installs four packages the
+So what it uses is **`requirements.txt`** in the repo root. That works. It installs four packages the
 running app never imports (`jupyter`, `kaggle`, `kagglehub`, `pytest`), which makes the build slower
 but does **not** meaningfully affect runtime memory, because memory is driven by what gets *imported*
 and nothing imports them.
@@ -306,12 +328,45 @@ If you somehow see it anyway: confirm you deployed the current `main`, and that 
 
 ### 8.2 The build fails installing dependencies
 
-Almost always the Python version. Go to **Manage app → Settings → Python version** and set **3.11**,
-then **Reboot app**.
+**This has happened for real, so start here rather than reading the error.**
 
-If it is a specific package failing, read which one. `kaggle` and `jupyter` are not needed by the
-running app — that is the case where you use the `requirements-deploy.txt` route described at the end
-of [§4](#4-deploy-the-app).
+Scroll the build log up to near the top and find the line reading
+`Using Python 3.X.Y environment at /home/adminuser/venv`.
+
+If that version is **3.13 or newer, that is your problem**, whatever the error at the bottom says. The
+observed failure was:
+
+```
+Using Python 3.14.6 environment at /home/adminuser/venv
+...
+× Failed to download and build `pillow==10.4.0`
+...
+The headers or library files could not be found for zlib,
+a required dependency when compiling Pillow from source.
+```
+
+Nothing there is about your code. `pandas==2.2.3` and the `pillow` pulled in by `streamlit==1.39.0`
+publish no wheels for 3.14, so pip tried to **compile them from source**, and that needs zlib headers
+the container lacks. Chasing zlib is wasted effort — you cannot install system packages on Community
+Cloud, and you would not need to on a supported Python.
+
+**The fix, and it is annoying:** the Python version can only be set when an app is created. There is no
+setting to change it afterwards.
+
+1. **Manage app** → **⋮** → **Delete app**. This costs nothing; all the code is in GitHub.
+2. Redo [§4](#4-deploy-the-app), and this time set **Python version → 3.11** in Advanced settings
+   before deploying.
+
+Two other symptoms of the same root cause, so you can recognise it early:
+
+- The log shows `Downloading pandas-2.2.3.tar.gz` — a **`.tar.gz` is source**, not a wheel. Any large
+  package arriving as a tarball means that version has no wheels for that Python.
+- The build runs far longer than the usual 5–10 minutes before failing. Compiling pandas from source
+  is tens of minutes of work that was never supposed to happen.
+
+If the version is right and a *specific* package still fails, read which one. `kaggle` and `jupyter`
+are not needed by the running app — that is the case where the `requirements-deploy.txt` route at the
+end of [§4](#4-deploy-the-app) applies.
 
 ### 8.3 The app loads but says "API Offline"
 
