@@ -4,20 +4,27 @@ frontend/app.py
 AML Suspicious Activity Detection — Streamlit UI.
 Owner: Track B.
 
-HTTP client only — talks to Track A's API at http://localhost:8000.
-No imports from backend.agent.* or backend.tools.*.
+Talks to the backend through frontend/api_client.py, which is the only module
+here that knows whether the backend is a separate process or this one. This
+file still imports nothing from backend.agent.* or backend.tools.*.
 
 OPERATION MODES
 ---------------
-LIVE mode   : API_BASE_URL responds to GET /health.
-              All queries go to POST /query. Sidebar shows live dataset summary.
-FIXTURE mode: API not reachable. Queries are matched to a saved fixture JSON
+LIVE mode   : the backend answers /health.
+              All queries go to /query. Sidebar shows live dataset summary.
+              Two transports, chosen by api_client on the AML_API_URL env var:
+                set   -> HTTP to that API. Two processes, the original design.
+                unset -> the backend runs inside the Streamlit process, which
+                         is what makes single-process hosts (Streamlit
+                         Community Cloud) viable at all.
+FIXTURE mode: backend not reachable. Queries are matched to a saved fixture JSON
               (frontend/fixtures/full_analysis.json) so the demo is never blocked.
               A banner clearly labels that fixture data is being shown.
-              The HTTP-client code path is IDENTICAL in both modes —
-              fixtures are only loaded if the HTTP call fails, not instead of it.
+              The client code path is IDENTICAL in both modes — fixtures are
+              only loaded if the call fails, not instead of it.
 
-Switching modes: start Track A's API (uvicorn backend.main:app) and refresh.
+Switching modes: start the API (uvicorn backend.main:app), set AML_API_URL to
+it, and refresh. Unset AML_API_URL to run everything in one process.
 
 Per WORKPLAN.md §7:
   "B never waits for A. Test every tool directly with pytest;
@@ -31,9 +38,9 @@ import os
 import time
 from pathlib import Path
 
-import requests
 import streamlit as st
 
+from frontend import api_client
 from frontend.components.plan_trace import render_plan_trace
 from frontend.components.flag_cards import render_flag_cards
 from frontend.components.charts import (
@@ -47,7 +54,41 @@ from frontend.components.charts import (
 # Config
 # ---------------------------------------------------------------------------
 
-API_BASE_URL  = os.getenv("AML_API_URL", "http://localhost:8000")
+
+def _prime_secrets() -> None:
+    """Force st.secrets to load before anything reads the environment.
+
+    Streamlit copies every top-level string/int/float secret into os.environ,
+    which is how a deployment configures backend/config.py without any code
+    knowing about st.secrets. But it does that lazily, inside the first access
+    to st.secrets — and backend/config.py builds its Settings object at IMPORT
+    time.
+
+    So the ordering is load-bearing. api_client imports the backend on the
+    first query, and if nothing has touched st.secrets by then, Settings reads
+    an environment the secrets have not been written to yet: the deployed app
+    silently runs on defaults, analysing synthetic_alt with mocks on, and looks
+    like it is working.
+
+    Touching st.secrets here, before the first backend import, is what makes
+    the secrets file actually take effect. Absent locally, where there is no
+    secrets.toml and .env covers the same ground.
+    """
+    try:
+        _ = st.secrets  # noqa: B018 — the access itself is the point
+        len(_)          # AttrDict is lazy too; force the parse
+    except Exception:
+        # No secrets file (normal locally). Environment and .env still apply.
+        pass
+
+
+_prime_secrets()
+
+# Kept for display only. The actual transport choice lives in api_client:
+# AML_API_URL set means HTTP to that API, unset means the backend runs inside
+# this process (which is what makes a single-process host like Streamlit
+# Community Cloud viable). See frontend/api_client.py.
+API_BASE_URL  = os.getenv("AML_API_URL", "").strip() or "in-process"
 FIXTURE_DIR   = Path(__file__).parent / "fixtures"
 REQUEST_TIMEOUT = 120   # seconds — must exceed LLM_TIMEOUT_SECONDS (50s) + pipeline (~5s)
 
@@ -95,38 +136,16 @@ EXAMPLE_QUERIES: list[dict] = [
 
 def _check_health() -> dict | None:
     """Return /health payload, or None if unreachable."""
-    try:
-        r = requests.get(f"{API_BASE_URL}/health", timeout=3)
-        r.raise_for_status()
-        return r.json()
-    except Exception:
-        return None
+    return api_client.check_health()
 
 
 def _get_dataset_summary() -> dict | None:
-    try:
-        r = requests.get(f"{API_BASE_URL}/dataset/summary", timeout=10)
-        r.raise_for_status()
-        return r.json()
-    except Exception:
-        return None
+    return api_client.get_dataset_summary()
 
 
 def _post_query(query_text: str, dataset: str | None = None) -> dict | None:
     """POST to /query and return the AgentResponse dict, or None on failure."""
-    try:
-        payload = {"query": query_text}
-        if dataset:
-            payload["dataset"] = dataset
-        r = requests.post(
-            f"{API_BASE_URL}/query",
-            json=payload,
-            timeout=REQUEST_TIMEOUT,
-        )
-        r.raise_for_status()
-        return r.json()
-    except Exception:
-        return None
+    return api_client.post_query(query_text, dataset)
 
 
 def _load_fixture(intent_hint: str | None = None) -> dict:
@@ -202,6 +221,11 @@ with st.sidebar:
         mocks  = health.get("mocks", False)
         st.markdown(f"**LLM:** {'✅ Available' if llm_ok else '⚠️ Offline (fallback mode)'}")
         st.markdown(f"**Mocks:** `{'on' if mocks else 'off'}`")
+        # Which transport served this — HTTP to a separate API process, or the
+        # backend running inside this one. Worth surfacing rather than hiding:
+        # on a single-process host the answer is always "in-process", and
+        # somebody debugging a deployment should not have to guess.
+        st.markdown(f"**Backend:** `{health.get('mode', API_BASE_URL)}`")
 
         summary = _get_dataset_summary()
         if summary:

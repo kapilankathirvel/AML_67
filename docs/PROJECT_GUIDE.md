@@ -50,6 +50,13 @@ constructed, validated, and only then executed, and the executed trace is return
 is what makes it auditable — a compliance function can read what was decided and why without reading
 the code.
 
+The UI reaches all of this through [`frontend/api_client.py`](../frontend/api_client.py), which chooses
+between HTTP to a separate FastAPI process and importing the backend into the Streamlit process. The
+second exists because free hosts run one process. It matters here only for one reason: the in-process
+path calls `backend.main`'s endpoint functions rather than re-running the pipeline itself, so there is
+exactly one implementation of what a query does and a deployed demo cannot answer differently from a
+local run.
+
 ---
 
 ## 2. Data

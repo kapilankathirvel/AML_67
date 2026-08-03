@@ -1,0 +1,51 @@
+# Runtime dependencies for the single-process deployment (Streamlit Community
+# Cloud or similar). Install: pip install -r requirements-deploy.txt
+#
+# This is requirements.txt minus everything the running app does not import.
+# The reason is memory, not tidiness: Community Cloud caps a container at
+# roughly 1 GB, and pandas + scikit-learn + networkx + plotly is already most
+# of that. Every package here is imported by a code path the deployed app can
+# reach.
+#
+# Dropped, and why:
+#   jupyter      — notebooks/ is developer material; nothing imports it
+#   kaggle       — the IBM ingestion path, which is not reachable from the UI
+#   kagglehub    —   "
+#   pytest       — tests do not run on the host
+#   pytest-mock  —   "
+#
+# Kept even though it looks droppable:
+#   fastapi/uvicorn — backend.main defines the FastAPI app, and the in-process
+#                     adapter imports that module to call its endpoint
+#                     functions directly. Importing it requires fastapi.
+#                     uvicorn stays so the same image can serve the two-process
+#                     deployment without a second requirements file.
+#   requests        — frontend/api_client.py's HTTP transport, used whenever
+#                     AML_API_URL is set.
+#
+# Versions are pinned identically to requirements.txt. Two files that drift on
+# versions would mean the deployment runs code nobody tested.
+
+# --- Web / API ---
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+pydantic==2.9.2
+pydantic-settings==2.6.0
+python-dotenv==1.0.1
+httpx==0.27.2
+
+# --- LLM client ---
+google-generativeai==0.8.3
+openai==1.51.0
+groq==1.6.0
+
+# --- Data / ML ---
+pandas==2.2.3
+numpy==2.1.2
+scikit-learn==1.5.2
+networkx==3.4.1
+
+# --- Frontend ---
+streamlit==1.39.0
+plotly==5.24.1
+requests==2.32.3

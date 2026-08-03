@@ -461,12 +461,51 @@ own process only — nothing on disk is modified, and env vars take precedence o
 pytest tests/ -v
 ```
 
+### Deploying it
+
+The app is normally **two processes** — Streamlit talking HTTP to FastAPI — which is right for a bank
+and impossible on a free single-process host. [`frontend/api_client.py`](frontend/api_client.py) removes
+that assumption without changing the architecture:
+
+| `AML_API_URL` | Transport | Processes |
+|---|---|---|
+| set | HTTP to that API, exactly as before | 2 |
+| unset / blank | the backend is imported and called directly | 1 |
+
+The in-process path calls `backend.main`'s own endpoint functions rather than re-running
+`intent_parser → planner → executor` itself. **There is one implementation of what a query does**, so a
+deployed demo and a local two-process run cannot drift apart. It is not a fallback for an API that is
+down: if `AML_API_URL` is set and unreachable, the UI drops to FIXTURE mode as it always has, because
+hiding an outage behind a working-looking demo is worse than showing the banner.
+
+**To deploy on Streamlit Community Cloud:** point it at `frontend/app.py`, set
+`requirements-deploy.txt` as the requirements file, and paste
+[`.streamlit/secrets.toml.example`](.streamlit/secrets.toml.example) into the Secrets box.
+
+Three things that file gets right and are easy to get wrong:
+
+- **`AML_DATA_SOURCE = "synthetic"`.** The application default is `synthetic_alt`, a *different
+  population* (1,710 txns / 294 customers against 2,002 / 270, no overlapping IDs). A demo left on the
+  default answers questions about one dataset while this README reports another.
+- **`AML_LLM_PLANNER` and `AML_LLM_REPLANNER` off.** The regex parser covers all seven intents and the
+  deterministic planner is the floor, so every button works with no key — and a free-tier quota behind
+  a public URL would let the first visitor to exhaust it degrade the demo for everyone after. Every
+  published metric comes from the deterministic path anyway.
+- **`AML_API_URL` blank**, which is what selects single-process mode.
+
+**Honest risks.** The real one is memory: Community Cloud caps a container near 1 GB and
+pandas + scikit-learn + networkx + plotly is most of that, which is why `requirements-deploy.txt` drops
+`jupyter`, `kaggle`, `kagglehub` and `pytest`. Cold starts are slow, and the first **Full analysis**
+click takes **~60s** locally — measured, not estimated — because it runs the whole detection stack. The
+threshold query returns in ~4s. If memory bites, Hugging Face Spaces with a Docker image runs both
+processes and removes the constraint.
+
 **Continuous integration** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) is split by
-measurement, not intuition. The full suite is **365 tests in ~23 minutes**, and almost all of that sits
+measurement, not intuition. The full suite is **395 tests in ~18–23 minutes**, and almost all of that sits
 in six files that drive the real feature pipeline — `feature_engineer` over 2,002 transactions costs
 ~27s, and several test classes pay it per test. So:
 
-- **On push and PR:** everything else — **267 tests in ~3 minutes**. Expressed as an *ignore* list, so
+- **On push and PR:** everything else — **287 tests in ~3 minutes** (2m15s on a runner). Expressed as an *ignore* list, so
   a new test file joins the fast job automatically; a file silently skipped by CI is invisible, whereas
   one that makes the fast job slow is obvious the first time somebody waits for it.
 - **Nightly:** the full suite, plus `python -m scripts.check_baselines`, which regenerates

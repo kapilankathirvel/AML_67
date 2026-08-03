@@ -54,7 +54,12 @@ def dataset_summary() -> dict:
         raise HTTPException(status_code=501, detail="load_data tool not available")
 
     ctx = ToolContext(df=None, customers=None, intent=None, artifacts={})
-    result = load_data(ctx)
+    # Same source /query analyses. Calling load_data bare here used to take its
+    # signature default, so with aml_data_source set the sidebar reported one
+    # dataset (synthetic_alt: 1,710 txns / 294 customers) while every query
+    # analysed another (synthetic: 2,002 / 270). Two numbers on one screen that
+    # disagree is worse than either being wrong on its own.
+    result = load_data(ctx, source=settings.aml_data_source)
     df = result.df if result.df is not None else ctx.df
     return {
         "row_count": 0 if df is None else len(df),
@@ -63,12 +68,38 @@ def dataset_summary() -> dict:
     }
 
 
+def _pin_data_source(plan, dataset: str | None) -> str:
+    """Force the load_data step onto one dataset, and say which.
+
+    The planner emits load_data with empty params, so its signature default
+    ('synthetic_alt') decides what gets analysed unless something overrides the
+    step. That is fine locally and wrong for a deployment: 'synthetic_alt' is a
+    different population from the labelled 'synthetic' set every published
+    metric describes, so a demo left on the default answers questions about one
+    dataset while README.md reports another.
+
+    Overriding the step is the supported mechanism — evaluation/run_evaluation.py
+    pins the source the same way, for the same reason.
+
+    Deliberately applied AFTER planning and sourced from configuration rather
+    than from the plan. plan_validator V14 blocks an LLM plan from reaching
+    load_data's `source` at all; this is the other half of that decision, which
+    is that choosing the dataset is the operator's call.
+    """
+    source = dataset or settings.aml_data_source
+    for step in plan.steps:
+        if step.tool == "load_data":
+            step.params = {**step.params, "source": source}
+    return source
+
+
 @app.post("/query", response_model=AgentResponse)
 def query(request: QueryRequest) -> AgentResponse:
     intent = parse_intent(request.query)
     # plan_query is build_plan plus an optional LLM planning step in front of
     # it; with settings.aml_llm_planner off (the default) it IS build_plan.
     plan = plan_query(intent)
+    _pin_data_source(plan, request.dataset)
     response = run_plan(intent, plan)
     # After run_plan, so the trace records the executor's own mid-run
     # re-planning rather than only what was planned up front.

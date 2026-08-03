@@ -30,6 +30,25 @@ class Settings(BaseSettings):
     aml_dataset_path: str = "data/sample/aml_sample.csv"
     aml_api_base_url: str = "http://localhost:8000"
 
+    # Which dataset /query analyses. Applied to the load_data step in
+    # backend/main.py, because the planner emits load_data with empty params
+    # and overriding that step is the supported way to pin it — the same thing
+    # evaluation/run_evaluation.py does for exactly the same reason.
+    #
+    # Defaults to load_data's own default, so behaviour is unchanged unless
+    # somebody sets it. A DEPLOYMENT should set it to "synthetic": that is the
+    # labelled 2,002-txn / 270-customer set every published metric is computed
+    # against, whereas "synthetic_alt" is a different population entirely
+    # (1,710 txns / 294 customers, different customer IDs). A demo running on
+    # one while README.md reports the other invites a reasonable visitor to
+    # conclude the numbers were invented.
+    #
+    # This is an operator setting and never a model-chosen one. plan_validator
+    # V14 exists precisely to stop an LLM plan reaching load_data's `source`;
+    # pinning it from configuration is the other half of the same decision.
+    # A plan may choose how to analyse, not which dataset the product runs on.
+    aml_data_source: str = "synthetic_alt"
+
     # Let the LLM choose which tools to run (backend/agent/llm_planner.py),
     # validated against backend/agent/plan_validator.py and falling back to the
     # deterministic planner on any failure.
