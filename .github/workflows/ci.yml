@@ -1,0 +1,106 @@
+# Two jobs, split by measurement rather than by intuition.
+#
+# The full suite takes 23 minutes, almost all of it in tests that run the real
+# feature pipeline over 2,002 transactions — `feature_engineer` costs ~27s and
+# several test classes pay it per test. That is too slow to sit between a push
+# and a green tick, so `fast` runs everything else (267 tests, ~3 minutes
+# locally) and `full` runs the lot nightly.
+#
+# The split is expressed as an IGNORE list, not an include list, so a NEW test
+# file joins the fast job automatically. The failure direction matters: a new
+# file silently skipped by CI is invisible, while a new file that makes the
+# fast job slow is obvious the first time someone waits for it.
+#
+# No .env exists on a runner, so the app falls back to backend/config.py's
+# defaults: mocks on, both LLM paths off, no keys. That was verified to give
+# byte-identical results to a local run with .env present (267 passed,
+# 3 skipped, both ways) — the per-module LLM stubbing in each test file is
+# what makes the suite insensitive to it. The env block below states those
+# values explicitly anyway, so the configuration under test is visible here
+# rather than implied by the absence of a file.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # 03:00 UTC daily. Nothing depends on the exact hour; it is off-peak for
+    # GitHub's shared runners, which is the only consideration.
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+env:
+  # backend/config.py's defaults, restated so the tested configuration is
+  # legible here instead of being an artifact of .env not existing.
+  AML_USE_MOCKS: "1"
+  AML_LLM_PLANNER: "0"
+  AML_LLM_REPLANNER: "0"
+
+jobs:
+  fast:
+    name: Fast tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run the fast suite
+        # Excludes the six files that drive the real feature pipeline. Their
+        # coverage is not lost — `full` runs them nightly.
+        run: |
+          python -m pytest tests/ -q \
+            --ignore=tests/test_ml.py \
+            --ignore=tests/test_features.py \
+            --ignore=tests/test_no_label_leakage.py \
+            --ignore=tests/test_evaluation.py \
+            --ignore=tests/test_ablation.py \
+            --ignore=tests/test_integration.py
+
+  full:
+    name: Full suite and published baselines
+    # Nightly and on demand only. Running this per push would put a 50-minute
+    # wait in front of every commit to buy very little: the fast job already
+    # covers 267 of the 365 tests, and the six excluded files test detection
+    # code that a documentation or agent-layer change cannot reach.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run the full suite
+        run: python -m pytest tests/ -q
+
+      - name: Verify the published baselines still reproduce
+        # Regenerates run_evaluation, ablation and evasion and diffs them
+        # against the JSON committed under evaluation/results/. This is the
+        # check that catches a detection change which passes every test and
+        # still leaves README.md describing a system that no longer exists.
+        run: python -m scripts.check_baselines

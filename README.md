@@ -459,6 +459,23 @@ own process only — nothing on disk is modified, and env vars take precedence o
 pytest tests/ -v
 ```
 
+**Continuous integration** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) is split by
+measurement, not intuition. The full suite is **365 tests in ~23 minutes**, and almost all of that sits
+in six files that drive the real feature pipeline — `feature_engineer` over 2,002 transactions costs
+~27s, and several test classes pay it per test. So:
+
+- **On push and PR:** everything else — **267 tests in ~3 minutes**. Expressed as an *ignore* list, so
+  a new test file joins the fast job automatically; a file silently skipped by CI is invisible, whereas
+  one that makes the fast job slow is obvious the first time somebody waits for it.
+- **Nightly:** the full suite, plus `python -m scripts.check_baselines`, which regenerates
+  `run_evaluation`, `ablation` and `evasion` and diffs them against the JSON committed under
+  `evaluation/results/`. That is the check for a detection change that passes every test and still
+  leaves this README describing a system that no longer exists.
+
+Runners have no `.env`, so CI runs on `backend/config.py`'s defaults: mocks on, both LLM paths off, no
+keys. That was verified to give byte-identical results to a local run with `.env` present — the
+per-module LLM stubbing in each test file is what makes the suite insensitive to it.
+
 ## Usage — example queries
 
 Type a query, or click one of the UI's example buttons. Each of these exercises a different point in the
