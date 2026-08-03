@@ -127,11 +127,37 @@ The most useful output of the post-deadline work is the list of things that turn
 - **The hybrid is less precise than either half.** 0.561, against 0.583 for rules-only and 0.692 for
   ML-only. It takes the union of their flags and inherits both sets of false positives. It wins on
   recall and F1 — that is the actual trade, and it is more defensible than claiming the hybrid is
-  simply better.
+  simply better. See the next section for the axis on which that trade is actually won.
 - **A small local model is not the bottleneck the architecture is.** The same planner scores **27% on
   a local 3B and 93% on a hosted model**, same validator, same prompts, same queries. The 3B result
   was kept deliberately: pushing it from 20% to 27% is what produced V12, V13 and the `load_data`
   repair. A weak model is a better validator test than a strong one.
+
+---
+
+## What was measured and confirmed
+
+One thing survived the attempt to disprove it, and it is the finding I would lead with.
+
+The ablation left the hybrid design looking indefensible: it is *less* precise than rules alone, so
+on a static dataset it buys recall with false positives and nothing else. That verdict is correct
+and incomplete, because a static dataset models an adversary who never adapts — and in AML that
+adversary does not exist. Structuring is itself an adaptation, to the $10,000 CTR threshold. The
+$9,000 band R1 keys on is the *previous* move in a game that is still being played.
+
+So the evasion study perturbs the launderers' own transactions in memory and asks what each rule
+costs to defeat. **Timing evasion effectively destroys the rules half** — spacing transactions
+further apart takes rule recall from 0.412 to 0.020, retaining 4.8% — **and the ML half barely
+registers it**, retaining 88.9%. Against all the moves used together the rules keep 9.5% and the
+hybrid keeps 39.1%. The hybrid retains more than the rules alone under every move tested.
+
+That is what the 0.022 of precision buys, and it is now a measured number rather than an assertion.
+Three caveats are published with it rather than left for someone else to find: the retention ratios
+are computed against each half's own baseline and are not comparable to each other (the ML half
+starts at 0.176 recall, the rules at 0.412); everything degrades in absolute terms, with hybrid
+recall under the combined move at 9 of 51 customers; and stepping under the $9,000 band costs a mean
+of $497 per transaction rather than the $1 the threshold's placement implies, because the in-band
+amounts average around $9,495.
 
 ---
 

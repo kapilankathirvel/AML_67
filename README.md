@@ -709,6 +709,62 @@ regardless: moving it would be tuning a published constant against the same 270-
 evaluated on, which is the circularity this study exists to expose rather than exploit. It is worth
 revisiting on the IBM data, where the tuning set and the evaluation set can differ.
 
+### Adversarial evasion: what does it cost to defeat us?
+
+Every number above assumes a launderer who does not know how they are being watched. That assumption is
+false by construction — **structuring *is* adversarial adaptation.** The $9,000–$9,999.99 band R1 keys on
+exists because launderers already adapted once, to the $10,000 CTR threshold. Writing a rule against that
+adaptation invites the next one, and the next one is arithmetic: send $8,999.
+
+So the question worth asking is not "what is our recall?" but **"what does it cost to make our recall
+zero?"** Regenerate with:
+
+```bash
+python -m evaluation.evasion
+```
+
+Labelled transactions belonging to the 51 sender-side positives are perturbed **in memory** — 202 of them.
+Ordinary customers are never touched, so the negative class is held fixed and any recall drop can only come
+from the evasion. Ground truth never moves: a launderer who evades successfully becomes a false negative
+rather than leaving the denominator. The full stack re-runs per configuration, because changing an amount
+changes the features, which changes both halves.
+
+**Recall retained at full evasion strength** (each half against its *own* unevaded baseline):
+
+| Move | What it costs the launderer | Rules | ML | Hybrid |
+|---|---|---|---|---|
+| Step below the $9,000 band | ~$497 per transaction | 0.524 | 0.667 | 0.609 |
+| Space transactions further apart | 41 days of mean delay | **0.048** | **0.889** | 0.391 |
+| Hold the cash-out past 24h | 48h on $1.30M of principal | 0.619 | **1.000** | 0.652 |
+| Move less money per transaction | 50% of all value | 0.381 | 0.667 | 0.609 |
+| **All three together** | $38k + 21 days + 48h | **0.095** | 0.778 | 0.391 |
+
+**This is the quantitative argument for the hybrid, and it is the one the ablation could not give.** On a
+static dataset the hybrid looked strictly worse than rules alone — less precise (0.561 vs 0.583) for more
+recall. Under an adversary the picture inverts: **timing evasion destroys the rules** (recall 0.412 → 0.020,
+retaining 4.8%) **and the ML half does not notice** (retaining 88.9%). Against the combined move the rules
+keep 9.5% and the hybrid keeps 39.1%. The hybrid retains more than the rules alone under **every** move
+tested. That is a robustness property, it is measured rather than asserted, and it is worth paying 0.022
+precision for.
+
+Three things that must be said alongside it, or the table reads as more than it is:
+
+- **The retention ratios are not comparable across columns.** The ML half starts at 0.176 recall and the
+  rules at 0.412. "ML retains 0.889" is retention of a much smaller number — it degrades gently partly
+  because it was never catching much to begin with. The defensible claim is the narrow one: **the two
+  halves fail to different moves.** It is not a claim that the ML half is the better detector.
+- **In absolute terms everything degrades.** Hybrid recall under the combined move is 0.176 — 9 of 51. The
+  system is more robust than its rules, not robust.
+- **The cheap evasion is not as cheap as the threshold suggests.** Stepping under the band costs a mean of
+  $497 per transaction, not $1, because the in-band amounts average ~$9,495 and shaving to $8,999 forfeits
+  the difference. That is an upper bound — a launderer who re-split across more transactions would pay less
+  — so the honest reading is that R1 costs its adversary somewhere between $1 and 5% of value, and R1 is
+  the *last* rule you would want to rely on alone.
+
+The one non-monotonicity is real and not smoothed: cash-out delay produces 30 rule hits at 24h but 32 at
+48h, because shifting a timestamp moves it out of R4's window and into a different R1 or R2 window. It is
+left in.
+
 ## Limitations
 
 - **LLM path is provider-agnostic (Gemini, OpenAI, Groq, or local Ollama) and always has a working
