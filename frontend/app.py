@@ -35,8 +35,30 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from pathlib import Path
+
+# --- repo root on sys.path, before any frontend.* or backend.* import -------
+#
+# `streamlit run frontend/app.py` puts only the SCRIPT'S folder on sys.path
+# (streamlit/web/bootstrap.py:60 does sys.path.insert(0, dirname(script))), not
+# the repo root. So `from frontend import ...` and `from backend import ...`
+# both fail under the launcher every host actually uses.
+#
+# It works locally purely by accident: run_demo.py invokes
+# `python -m streamlit`, and -m puts the working directory on sys.path. Run the
+# same app with the `streamlit` console script and it dies on the first import.
+# Measured, not guessed — with the repo root removed and only frontend/ added,
+# all three of frontend.api_client, frontend.components.plan_trace and
+# backend.main raise ModuleNotFoundError.
+#
+# This must stay above the imports below, which is why it violates the usual
+# "imports at the top" shape. tests/test_app_imports.py pins it.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+# ---------------------------------------------------------------------------
 
 import streamlit as st
 

@@ -478,9 +478,15 @@ deployed demo and a local two-process run cannot drift apart. It is not a fallba
 down: if `AML_API_URL` is set and unreachable, the UI drops to FIXTURE mode as it always has, because
 hiding an outage behind a working-looking demo is worse than showing the banner.
 
-**To deploy on Streamlit Community Cloud:** point it at `frontend/app.py`, set
-`requirements-deploy.txt` as the requirements file, and paste
-[`.streamlit/secrets.toml.example`](.streamlit/secrets.toml.example) into the Secrets box.
+**To deploy on Streamlit Community Cloud:** point it at `frontend/app.py`, set Python to 3.11, and
+paste [`.streamlit/secrets.toml.example`](.streamlit/secrets.toml.example) into the Secrets box.
+Full step-by-step instructions, including verification and troubleshooting, are in
+**[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**.
+
+`requirements-deploy.txt` is the trimmed dependency list, for the case where the root
+`requirements.txt` is too heavy to build. It is not needed by default — the four packages it drops
+(`jupyter`, `kaggle`, `kagglehub`, `pytest`) slow the build but are never imported, so they cost
+build time rather than runtime memory.
 
 Three things that file gets right and are easy to get wrong:
 
@@ -501,11 +507,11 @@ threshold query returns in ~4s. If memory bites, Hugging Face Spaces with a Dock
 processes and removes the constraint.
 
 **Continuous integration** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) is split by
-measurement, not intuition. The full suite is **395 tests in ~18–23 minutes**, and almost all of that sits
+measurement, not intuition. The full suite is **398 tests in ~18–23 minutes**, and almost all of that sits
 in six files that drive the real feature pipeline — `feature_engineer` over 2,002 transactions costs
 ~27s, and several test classes pay it per test. So:
 
-- **On push and PR:** everything else — **287 tests in ~3 minutes** (2m15s on a runner). Expressed as an *ignore* list, so
+- **On push and PR:** everything else — **290 tests in ~3½ minutes** (2m15s on a runner). Expressed as an *ignore* list, so
   a new test file joins the fast job automatically; a file silently skipped by CI is invisible, whereas
   one that makes the fast job slow is obvious the first time somebody waits for it.
 - **Nightly:** the full suite, plus `python -m scripts.check_baselines`, which regenerates
