@@ -1,5 +1,7 @@
 # AI-Powered Suspicious Activity Detection — AML Agent
 
+[![CI](https://github.com/kapilankathirvel/AML_67/actions/workflows/ci.yml/badge.svg)](https://github.com/kapilankathirvel/AML_67/actions/workflows/ci.yml)
+
 An agentic system for AML compliance: a natural-language query goes in, the agent parses intent,
 **builds a query-specific execution plan** (not a fixed pipeline), calls only the tools that plan needs,
 and returns risk-scored, explained, escalation-tagged flags — with the plan itself shown to the user, so
