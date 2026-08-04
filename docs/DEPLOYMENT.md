@@ -232,11 +232,20 @@ Now click **Deploy**.
 
 ### What happens next
 
-The build takes **5–10 minutes** on the first run. You will see a log streaming. It goes:
+The build takes **3–7 minutes** on the first run, because on Python 3.11 every dependency installs as
+a prebuilt wheel and no compiler runs. You will see a log streaming. It goes:
 
 1. Cloning the repository
-2. Installing dependencies — this is the slow part, `scikit-learn` and `pandas` are large
+2. Installing dependencies — the slow part; `scipy`, `pandas` and `pyarrow` are large
 3. `You can now view your Streamlit app in your browser`
+
+**If you are past ten minutes and still watching install logs, something is wrong.** Scroll to the top
+of the log and check the Python version — the failed build that prompted this warning ran for
+**45 minutes** before dying, because it was compiling pandas and pillow from C source on Python 3.14.
+See [§8.2](#82-the-build-fails-installing-dependencies).
+
+After the build, the first page load adds roughly 30 seconds of cold start, and the first
+**Full analysis** click takes about 60 seconds. Both are expected; see [§6](#6-verify-it-actually-works).
 
 If the log stops with a red error, go to [§8](#8-troubleshooting).
 
@@ -294,18 +303,51 @@ Do this **before** you send the link to anyone, so you know what they will see.
 
 ---
 
-## 7. If Streamlit Cloud does not work out
+## 7. Resource limits, and other platforms
 
-The realistic failure is **memory**. Community Cloud caps a container at roughly 1 GB, and
-pandas + scikit-learn + networkx + plotly is most of that before your data is loaded. If the app keeps
-restarting or dies mid-query, that is what is happening.
+### What the app actually uses
 
-**Fallback: Hugging Face Spaces.** It supports Docker, which means you can run both processes the way
-the app was designed, and the free tier gives 16 GB of RAM. It is more setup — you write a Dockerfile
-and push to a Space — but it removes the constraint entirely rather than working around it.
+Measured, not estimated — peak resident memory through a full session on Python 3.11:
 
-Ask me and I will write the Dockerfile and the Space configuration if you get to that point. Do not
-start there; try the fifteen-minute path first.
+| Stage | Peak RSS |
+|---|---|
+| pandas + numpy | 77 MB |
+| + scikit-learn | 152 MB |
+| + networkx + plotly | 165 MB |
+| + streamlit | 179 MB |
+| + backend imported, dataset loaded | 213 MB |
+| **+ full_analysis (41 flags)** | **252 MB** |
+| + two further queries | **254 MB** |
+
+**Peak 254 MB, and it levels off** — a third `full_analysis` used exactly the same as the second, so
+there is no leak across queries. With Streamlit's own server and session overhead on top, call it
+~350 MB against Community Cloud's ~1 GB. That is roughly 3× headroom.
+
+An earlier draft of this guide called memory "the real risk". That was caution without evidence and it
+was wrong. The thing that actually breaks this deploy is the Python version
+([§8.2](#82-the-build-fails-installing-dependencies)).
+
+Disk is not a constraint either, and the trimmed requirements file barely helps: `jupyter`,
+`jupyterlab` and `notebook` come to about 40 MB, `kaggle` 1 MB, `pytest` under 1 MB. The bulk is
+unavoidable — scipy 113 MB, plotly 87 MB, pyarrow 85 MB, pandas 67 MB, scikit-learn 45 MB, numpy
+34 MB. **`requirements-deploy.txt` saves ~50 MB of disk and zero RAM.** Use the root
+`requirements.txt`.
+
+### Why Streamlit Community Cloud rather than somewhere else
+
+| Platform | Verdict | Why |
+|---|---|---|
+| **Streamlit Community Cloud** | ✅ **Best fit** | Purpose-built for Streamlit. ~1 GB limit against a measured 254 MB. Free, deploys from GitHub, no card |
+| **Hugging Face Spaces** | ✅ Best fallback | Free tier gives **16 GB RAM** and 2 vCPU, and supports Docker — so it could run both processes as originally designed. More setup: a Dockerfile and a Space |
+| **Render** | ⚠️ Works, badly | Free tier is **512 MB RAM and 0.1 CPU**. Memory fits; the CPU does not — a query that takes 60s here would take many minutes. Also sleeps after 15 minutes idle |
+| **Vercel** | ❌ Architecturally impossible | Serverless, with a **250 MB** function size limit against ~430 MB of core dependencies, and a request timeout below this app's 60s query. Streamlit also needs a persistent WebSocket server, which serverless is not |
+| **GitHub Pages** | ❌ Architecturally impossible | Static file hosting. No Python execution of any kind |
+
+The last two are worth being clear about: they are not *tight*, they are the wrong shape. Neither can
+run a long-lived Python process, and that is what Streamlit fundamentally is.
+
+If you do end up needing Hugging Face Spaces, ask and I will write the Dockerfile and Space
+configuration. Do not start there — the measurements say Community Cloud is comfortable.
 
 ---
 

@@ -499,12 +499,17 @@ Three things that file gets right and are easy to get wrong:
   published metric comes from the deterministic path anyway.
 - **`AML_API_URL` blank**, which is what selects single-process mode.
 
-**Honest risks.** The real one is memory: Community Cloud caps a container near 1 GB and
-pandas + scikit-learn + networkx + plotly is most of that, which is why `requirements-deploy.txt` drops
-`jupyter`, `kaggle`, `kagglehub` and `pytest`. Cold starts are slow, and the first **Full analysis**
-click takes **~60s** locally — measured, not estimated — because it runs the whole detection stack. The
-threshold query returns in ~4s. If memory bites, Hugging Face Spaces with a Docker image runs both
-processes and removes the constraint.
+**Measured cost.** Peak resident memory through a full session is **254 MB** — 77 MB for pandas, 152 MB
+after scikit-learn, 213 MB with the dataset loaded, 252 MB after a `full_analysis` — and it *levels
+off*: a third query used exactly what the second did, so nothing leaks. Against Community Cloud's ~1 GB
+that is comfortable, and an earlier version of this section calling memory "the real risk" was caution
+without evidence. What actually breaks the deploy is the Python version — the pinned `pandas` and
+`pillow` publish no wheels for 3.13+, so anything newer compiles from source and fails.
+
+Speed is the honest cost, not memory. The first **Full analysis** click takes **~60s** because it runs
+the whole detection stack; the threshold query returns in ~4s, precisely because the agent plans
+differently for it. Cold starts add ~30s. If a host ever does run out of room, Hugging Face Spaces
+gives 16 GB and Docker, and can run both processes as originally designed.
 
 **Continuous integration** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) is split by
 measurement, not intuition. The full suite is **398 tests in ~18–23 minutes**, and almost all of that sits
