@@ -7,7 +7,7 @@ guide covers the single-process path, which [`frontend/api_client.py`](../fronte
 exists to make possible.
 
 Target: **Streamlit Community Cloud**. It is free, it deploys straight from GitHub, and it needs no
-credit card. The fallback if it does not fit is in [§7](#7-if-streamlit-cloud-does-not-work-out).
+credit card. The fallback if it does not fit is in [§7](#7-resource-limits-and-other-platforms).
 
 **Time:** about 15 minutes of your attention, plus 5–10 minutes of waiting for the first build.
 
@@ -21,7 +21,7 @@ credit card. The fallback if it does not fit is in [§7](#7-if-streamlit-cloud-d
 4. [Deploy the app](#4-deploy-the-app)
 5. [Add the secrets](#5-add-the-secrets)
 6. [Verify it actually works](#6-verify-it-actually-works)
-7. [If Streamlit Cloud does not work out](#7-if-streamlit-cloud-does-not-work-out)
+7. [Resource limits, and other platforms](#7-resource-limits-and-other-platforms)
 8. [Troubleshooting](#8-troubleshooting)
 9. [After it is live](#9-after-it-is-live)
 
@@ -253,14 +253,39 @@ If the log stops with a red error, go to [§8](#8-troubleshooting).
 
 ## 6. Verify it actually works
 
-A page that loads is not a demo that works. Check all five of these.
+A page that loads is not a demo that works. Check all six of these.
+
+### 6.0 Anyone can actually open it
+
+**Do this first, and do it from a browser that is not signed in to Streamlit** — a private window, or
+your phone with wifi off.
+
+A newly created app can be restricted to invited viewers, and the symptom is easy to miss because
+*you* are signed in and it works perfectly for you. Everyone else gets a Streamlit sign-in page.
+
+This happened on the first deploy of this app. From an unauthenticated client the URL bounces:
+
+```
+antimoneylaundering67.streamlit.app/           -> 303
+share.streamlit.io/-/auth/app?redirect_uri=... -> 303
+antimoneylaundering67.streamlit.app/-/login    -> back to the start
+```
+
+Note the repository being public does not make the app public; they are separate settings.
+
+**Fix:** **Manage app → Settings → Sharing**, and set viewer access to public / anyone with the link.
+It takes effect immediately, with no rebuild.
+
+**Why this matters more than it looks:** an interviewer who clicks the link and is asked to create an
+account will not create the account. They will conclude the demo does not work, and you will never
+find out that is what happened. A link that silently requires a login is worse than no link.
 
 ### 6.1 The sidebar says the right things
 
 Look at the left sidebar:
 
 - ✅ **API Online** — green. If it says *API Offline* with a fixture warning, the backend failed to
-  start; see [§8.3](#83-the-app-loads-but-says-api-offline).
+  start; see [§8.4](#84-the-app-loads-but-says-api-offline).
 - **Backend:** `in-process` — confirms single-process mode.
 - **Mocks:** `off` — confirms real detectors.
 - **Transactions: 2,002** and **Customers: 270**
@@ -410,7 +435,15 @@ If the version is right and a *specific* package still fails, read which one. `k
 are not needed by the running app — that is the case where the `requirements-deploy.txt` route at the
 end of [§4](#4-deploy-the-app) applies.
 
-### 8.3 The app loads but says "API Offline"
+### 8.3 Other people are asked to sign in
+
+The app is restricted to invited viewers. See [§6.0](#60-anyone-can-actually-open-it) — the fix is
+**Manage app → Settings → Sharing**, and it is not the same setting as the repository's visibility.
+
+You will not notice this from your own browser, because you are signed in. Always check the link from
+a private window before sending it to anyone.
+
+### 8.4 The app loads but says "API Offline"
 
 The UI could not reach a backend, so it is showing fixture data behind a warning banner.
 
@@ -421,7 +454,7 @@ is listening.
 If it is blank and you still see this, the backend failed to import. Open **Manage app** and read the
 log for a traceback.
 
-### 8.4 The sidebar shows 1,710 transactions / 294 customers
+### 8.5 The sidebar shows 1,710 transactions / 294 customers
 
 `AML_DATA_SOURCE` is not reaching the app. Two causes:
 
@@ -429,12 +462,12 @@ log for a traceback.
 2. You edited secrets after the app started. Streamlit reads secrets at startup —
    **Manage app → Reboot app**.
 
-### 8.5 A query hangs or times out
+### 8.6 A query hangs or times out
 
 Full analysis takes ~60 seconds legitimately. Beyond about three minutes, suspect memory — see
-[§7](#7-if-streamlit-cloud-does-not-work-out).
+[§7](#7-resource-limits-and-other-platforms).
 
-### 8.6 Changes to the repo do not appear
+### 8.7 Changes to the repo do not appear
 
 Community Cloud redeploys on push to the tracked branch, but not instantly. Force it with
 **Manage app → Reboot app**. Confirm you pushed to `main` and not another branch.
