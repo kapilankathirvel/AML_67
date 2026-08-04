@@ -481,7 +481,8 @@ hiding an outage behind a working-looking demo is worse than showing the banner.
 **To deploy on Streamlit Community Cloud:** point it at `frontend/app.py`, set Python to 3.11, and
 paste [`.streamlit/secrets.toml.example`](.streamlit/secrets.toml.example) into the Secrets box.
 Full step-by-step instructions, including verification and troubleshooting, are in
-**[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**.
+**[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**. Where the deployed code actually runs, and why a public
+demo needs no API key at all, is in **[docs/DEPLOYED_RUNTIME.md](docs/DEPLOYED_RUNTIME.md)**.
 
 `requirements-deploy.txt` is the trimmed dependency list, for the case where the root
 `requirements.txt` is too heavy to build. It is not needed by default — the four packages it drops

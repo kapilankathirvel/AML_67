@@ -495,6 +495,11 @@ precomputed results — features over 2,002 transactions, seven rules, two ML mo
 threshold query returns in ~4 seconds precisely because the agent *plans differently* for it and skips
 the expensive tools. The slowness and the plan divergence are the same fact.
 
+**"Does this use your API key / your machine?"** Neither. There is no key in the deployment and every
+LLM call site falls back cleanly to the regex parser and template narrator, so the demo costs nothing
+to run and cannot exhaust a quota. [DEPLOYED_RUNTIME.md](DEPLOYED_RUNTIME.md) has the full answer with
+the evidence, including why the deployed code cannot reach a local Ollama.
+
 **"Is this real data?"** No, and say so first rather than being asked. It is a synthetic dataset the
 project generated for itself. The IBM AML ingestion path is built and has never been run because it
 needs a Kaggle token. There is a fuller answer to this question in your private briefing —
