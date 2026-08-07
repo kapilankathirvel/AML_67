@@ -513,15 +513,15 @@ differently for it. Cold starts add ~30s. If a host ever does run out of room, H
 gives 16 GB and Docker, and can run both processes as originally designed.
 
 **Continuous integration** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) is split by
-measurement, not intuition. The full suite is **398 tests in ~18–23 minutes**, and almost all of that sits
-in six files that drive the real feature pipeline — `feature_engineer` over 2,002 transactions costs
+measurement, not intuition. The full suite is **421 tests in ~22 minutes**, and almost all of that sits
+in seven files that drive the real feature pipeline — `feature_engineer` over 2,002 transactions costs
 ~27s, and several test classes pay it per test. So:
 
-- **On push and PR:** everything else — **290 tests in ~3½ minutes** (2m15s on a runner). Expressed as an *ignore* list, so
+- **On push and PR:** everything else — **291 tests in ~3½ minutes** (2m15s on a runner). Expressed as an *ignore* list, so
   a new test file joins the fast job automatically; a file silently skipped by CI is invisible, whereas
   one that makes the fast job slow is obvious the first time somebody waits for it.
 - **Nightly:** the full suite, plus `python -m scripts.check_baselines`, which regenerates
-  `run_evaluation`, `ablation` and `evasion` and diffs them against the JSON committed under
+  `run_evaluation`, `ablation`, `evasion` and `out_of_time` and diffs them against the JSON committed under
   `evaluation/results/`. That is the check for a detection change that passes every test and still
   leaves this README describing a system that no longer exists.
 
@@ -842,6 +842,65 @@ The one non-monotonicity is real and not smoothed: cash-out delay produces 30 ru
 48h, because shifting a timestamp moves it out of R4's window and into a different R1 or R2 window. It is
 left in.
 
+### Out-of-time validation: does the ML half generalise forward?
+
+`ml_detect` fits IsolationForest and LOF on the same rows it scores. That is defensible for unsupervised
+transductive scoring — nobody is claiming a trained artifact, and a percentile is a statement about a
+population rather than a prediction about a future customer. It is also the first thing a bank's
+model-validation function asks about, and "it is transductive by design" is only a good answer if you can
+say what the alternative would have cost.
+
+```bash
+python -m evaluation.out_of_time
+```
+
+Fit on the first 60 days, score the last 29. All rows below see the **same test-window transactions** and
+the **same ground truth**; only the ML half moves, one variable at a time:
+
+| Arm | Flagged | HIGH | Precision | Recall | F1 |
+|---|---|---|---|---|---|
+| Rules only — the floor, cannot degrade out of time | 16 | 0 | 0.438 | 0.583 | 0.500 |
+| **A.** fit on test, rank in test — *what ships* | 20 | 9 | 0.400 | 0.667 | 0.500 |
+| **B.** fit on train, rank in test | 22 | 9 | 0.364 | 0.667 | 0.471 |
+| **C.** fit on train, rank against train — *a deployed model* | 22 | 14 | 0.364 | 0.667 | 0.471 |
+
+**Freezing the model costs 0.036 precision and no recall.** The transductive shortcut is buying very
+little, which is the useful finding: the design could be changed to a genuinely fitted-then-frozen model
+for roughly the price of one false positive, and the reason not to is simplicity rather than accuracy. B
+and C being identical says the damage, such as it is, comes from the fit rather than from freezing the cut
+points — and those have completely different fixes.
+
+**Two things make that a lower bound, and both are the dataset's fault rather than the method's:**
+
+- **There are no cold starts.** All 268 test-window customers also transact in the training window, because
+  the generator gives everyone activity across the whole span. Out-of-time validation is mostly a question
+  about customers the model has never seen, and this dataset contains none of them.
+- **R6 cannot fire in a 29-day window.** It requires 60 days of dormancy, so it is arithmetically incapable
+  of a hit here — a zero that is a property of the experiment, not a verdict on the rule. It scores zero on
+  the full dataset too, so nothing is being hidden by it.
+
+#### What this study found that it was not looking for
+
+**R3 reports more layering chains on 29 days of data (6) than on the full 90 (4).** A hit count that falls
+as evidence accumulates is not noise, and the cause is at `rules.py:311`: R3 enumerates paths only from
+nodes with **in-degree 0** to nodes with out-degree 0.
+
+| Window | Eligible txns | Nodes | Sources (in-deg 0) | Sinks (out-deg 0) | (src, snk) pairs searched | R3 hits |
+|---|---|---|---|---|---|---|
+| test, 29d | 362 | 242 | 46 | 50 | **2,300** | 6 |
+| train, 60d | 659 | 269 | 28 | 21 | 588 | 12 |
+| full, 89d | 1,021 | 270 | **6** | 7 | **42** | 4 |
+
+**R3 is anti-monotone in data volume** — more history gives it a *smaller* search space, because a node
+that looked like a chain origin over 29 days has received something by day 90. Extrapolated to a production
+graph with years of history, virtually no customer has zero inbound wires and R3 has almost nowhere to
+begin. It would approach zero recall on exactly the datasets it matters on.
+
+Reported rather than fixed: changing detection code would invalidate every baseline under
+`evaluation/results/`, which is a decision to take deliberately rather than as a side effect of adding a
+study. It is pinned by `tests/test_out_of_time.py::test_r3_search_space_shrinks_as_the_window_grows`, so
+whoever fixes it will be told that this section needs revisiting with it.
+
 ## Limitations
 
 - **LLM path is provider-agnostic (Gemini, OpenAI, Groq, or local Ollama) and always has a working
@@ -883,6 +942,17 @@ left in.
   29 of the 51 receive exactly one labelled transaction, which is not distinguishable from being an
   innocent counterparty. Closing the rest would need a signal this dataset does not contain — account
   ownership, KYC linkage, or device/IP overlap.
+- **The ML half is transductive: it fits and scores the same rows** (`ml_detect.py:256`). Defensible for
+  unsupervised scoring, and [measured rather than argued](#out-of-time-validation-does-the-ml-half-generalise-forward)
+  — fitting on the first 60 days and scoring the last 29 costs 0.036 precision and no recall. Two caveats
+  bound that number: this dataset has no customers absent from the training window, so cold-start cost is
+  unmeasured, and `LocalOutlierFactor` is constructed with `novelty=False`, meaning **the shipped
+  `ml_detect` cannot score unseen rows at all** — the study substitutes `novelty=True` and reports an
+  IsolationForest-only control to show the substitution is not carrying the result.
+- **R3's recall degrades as the dataset grows.** It enumerates layering chains only from in-degree-0 nodes,
+  and that set shrinks with history: 46 such nodes over 29 days, 6 over 90. On a production graph it would
+  have almost nowhere to start. Known, measured, and deliberately not yet fixed — see
+  [above](#what-this-study-found-that-it-was-not-looking-for).
 - Batch analysis over a sample dataset, not live streaming — explicitly in scope per the brief.
 - Synthetic data documents its own generation assumptions (seed, thresholds, ring sizes) in
   [DATA_CARD.md](docs/DATA_CARD.md) — real-world deployment would need those revalidated against production

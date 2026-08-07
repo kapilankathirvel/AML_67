@@ -1,10 +1,10 @@
 # Two jobs, split by measurement rather than by intuition.
 #
-# The full suite takes 23 minutes, almost all of it in tests that run the real
-# feature pipeline over 2,002 transactions — `feature_engineer` costs ~27s and
-# several test classes pay it per test. That is too slow to sit between a push
-# and a green tick, so `fast` runs everything else (267 tests, ~3 minutes
-# locally) and `full` runs the lot nightly.
+# The full suite takes ~22 minutes (421 tests: 418 passed, 3 skipped), almost
+# all of it in tests that run the real feature pipeline over 2,002 transactions
+# — `feature_engineer` costs ~27s and several test classes pay it per test. That
+# is too slow to sit between a push and a green tick, so `fast` runs everything
+# else (291 tests, ~3 minutes locally) and `full` runs the lot nightly.
 #
 # The split is expressed as an IGNORE list, not an include list, so a NEW test
 # file joins the fast job automatically. The failure direction matters: a new
@@ -13,9 +13,10 @@
 #
 # No .env exists on a runner, so the app falls back to backend/config.py's
 # defaults: mocks on, both LLM paths off, no keys. That was verified to give
-# byte-identical results to a local run with .env present (267 passed,
-# 3 skipped, both ways) — the per-module LLM stubbing in each test file is
-# what makes the suite insensitive to it. The env block below states those
+# byte-identical results to a local run with .env present — the per-module LLM
+# stubbing in each test file is what makes the suite insensitive to it. (The
+# check was run when the suite stood at 267 passed, 3 skipped; the mechanism has
+# not changed since, but the count has.) The env block below states those
 # values explicitly anyway, so the configuration under test is visible here
 # rather than implied by the absence of a file.
 
@@ -60,7 +61,7 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run the fast suite
-        # Excludes the six files that drive the real feature pipeline. Their
+        # Excludes the seven files that drive the real feature pipeline. Their
         # coverage is not lost — `full` runs them nightly.
         run: |
           python -m pytest tests/ -q \
@@ -69,13 +70,14 @@ jobs:
             --ignore=tests/test_no_label_leakage.py \
             --ignore=tests/test_evaluation.py \
             --ignore=tests/test_ablation.py \
-            --ignore=tests/test_integration.py
+            --ignore=tests/test_integration.py \
+            --ignore=tests/test_out_of_time.py
 
   full:
     name: Full suite and published baselines
     # Nightly and on demand only. Running this per push would put a 50-minute
     # wait in front of every commit to buy very little: the fast job already
-    # covers 267 of the 365 tests, and the six excluded files test detection
+    # covers 291 of the 421 tests, and the seven excluded files test detection
     # code that a documentation or agent-layer change cannot reach.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
@@ -99,8 +101,8 @@ jobs:
         run: python -m pytest tests/ -q
 
       - name: Verify the published baselines still reproduce
-        # Regenerates run_evaluation, ablation and evasion and diffs them
-        # against the JSON committed under evaluation/results/. This is the
+        # Regenerates run_evaluation, ablation, evasion and out_of_time and
+        # diffs them against the JSON committed under evaluation/results/. The
         # check that catches a detection change which passes every test and
         # still leaves README.md describing a system that no longer exists.
         run: python -m scripts.check_baselines

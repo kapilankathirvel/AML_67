@@ -8,7 +8,7 @@ Usage
 
 Why this exists
 ---------------
-Three JSON files under evaluation/results/ are the provenance for every number
+Four JSON files under evaluation/results/ are the provenance for every number
 in README.md and docs/. They were each produced by a real run, and nothing
 until now re-ran them. A change to detection could therefore land, pass the
 entire test suite, and leave the documented metrics quietly describing a system
@@ -59,6 +59,7 @@ STUDIES: list[tuple[str, str, Path]] = [
     ("evaluation", "evaluation.run_evaluation", _RESULTS / "after_repeat_receiver_gt.json"),
     ("ablation", "evaluation.ablation", _RESULTS / "ablation.json"),
     ("evasion", "evaluation.evasion", _RESULTS / "evasion.json"),
+    ("out_of_time", "evaluation.out_of_time", _RESULTS / "out_of_time.json"),
 ]
 
 

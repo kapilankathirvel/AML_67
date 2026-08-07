@@ -155,6 +155,46 @@ class GroundTruth:
         )
 
 
+def ground_truth_from_frames(
+    df: pd.DataFrame,
+    all_customers: Iterable[str],
+) -> GroundTruth:
+    """Lift transaction labels in `df` to customer level over a fixed roster.
+
+    Separated from `load_ground_truth` so a *subset* of transactions can be
+    scored — a time window, an evasion-perturbed frame — against the same
+    definitions, without writing a second copy of the lifting logic that could
+    drift from this one.
+
+    `all_customers` is the population, passed in rather than derived, because
+    the caller decides what "everyone" means: the full roster for a whole-file
+    run, or the customers active in a window for an out-of-time run. Every set
+    is intersected with it, so a counterparty that appears in transactions but
+    not in the population never inflates a denominator.
+    """
+    population = set(all_customers)
+    labelled = df[_as_bool(df["label_is_laundering"])]
+
+    senders = set(labelled["sender_id"]) & population
+    receivers = set(labelled["receiver_id"]) & population
+
+    # Receivers of MORE THAN ONE labelled transaction. value_counts() is over
+    # the raw column, so intersect with the roster afterwards for the same
+    # reason every other set here does.
+    inbound_counts = labelled["receiver_id"].value_counts()
+    repeat_receivers = set(
+        inbound_counts[inbound_counts >= REPEAT_RECEIVER_MIN_TXNS].index
+    ) & population
+
+    return GroundTruth(
+        all_customers=population,
+        sender_only=senders,
+        sender_or_receiver=senders | receivers,
+        sender_or_repeat_receiver=senders | repeat_receivers,
+        labelled_txn_count=int(len(labelled)),
+    )
+
+
 def load_ground_truth(
     txn_csv: str | Path = DEFAULT_TXN_CSV,
     cust_csv: str | Path = DEFAULT_CUST_CSV,
@@ -164,35 +204,10 @@ def load_ground_truth(
     Returns the raw transactions frame alongside the ground truth, because
     callers (the naive baseline) need the transactions too and there's no
     reason to read the file twice.
-
-    Every set is intersected with the customer roster, so a counterparty that
-    appears in transactions but not in the customer table never inflates a
-    denominator.
     """
     df = pd.read_csv(txn_csv)
     cust = pd.read_csv(cust_csv)
-
-    all_customers = set(cust["customer_id"])
-    labelled = df[_as_bool(df["label_is_laundering"])]
-
-    senders = set(labelled["sender_id"]) & all_customers
-    receivers = set(labelled["receiver_id"]) & all_customers
-
-    # Receivers of MORE THAN ONE labelled transaction. value_counts() is over
-    # the raw column, so intersect with the roster afterwards for the same
-    # reason every other set here does.
-    inbound_counts = labelled["receiver_id"].value_counts()
-    repeat_receivers = set(
-        inbound_counts[inbound_counts >= REPEAT_RECEIVER_MIN_TXNS].index
-    ) & all_customers
-
-    return df, GroundTruth(
-        all_customers=all_customers,
-        sender_only=senders,
-        sender_or_receiver=senders | receivers,
-        sender_or_repeat_receiver=senders | repeat_receivers,
-        labelled_txn_count=int(len(labelled)),
-    )
+    return df, ground_truth_from_frames(df, set(cust["customer_id"]))
 
 
 def naive_baseline(

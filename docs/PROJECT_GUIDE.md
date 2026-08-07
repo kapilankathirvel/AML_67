@@ -177,8 +177,32 @@ wrong. Every rule is now scored under both.
 
 4 hits, zero true positives, and removing it improves precision at no recall cost. It is **kept**
 anyway: 4 hits is far too small a sample to retire a rule on, and the layering typology is real. But
-it is on the record rather than hidden inside an aggregate, and it is the first thing I would revisit
-on real data.
+it is on the record rather than hidden inside an aggregate.
+
+**And the out-of-time study found out why it only gets 4.** R3 enumerates chains only from nodes with
+**in-degree 0** in the wire/transfer subgraph (`rules.py:311`). That set shrinks as history
+accumulates, because a node that looked like a chain origin over 29 days has received something by day
+90:
+
+| Window | Eligible txns | Sources (in-deg 0) | Sinks | Pairs searched | R3 hits |
+|---|---|---|---|---|---|
+| 29 days | 362 | 46 | 50 | 2,300 | 6 |
+| 60 days | 659 | 28 | 21 | 588 | 12 |
+| 89 days | 1,021 | **6** | 7 | **42** | 4 |
+
+**R3 is anti-monotone in data volume.** More evidence gives it a smaller search space. The 4 hits are
+not a rule that is bad at layering — they are a rule that had 42 candidate pairs left to search out of
+a possible 2,300. On a production graph with years of history, effectively nobody has zero inbound
+wires and R3 would have nowhere to start at all.
+
+If you are asked one question about the rules, this is the one worth volunteering. It is a concrete,
+mechanical, scale-dependent defect, and the fix is not a threshold — it is that "chain origin" cannot
+be defined as a global graph property when the graph is a growing accumulation of history. It needs
+to be defined within a time window, which is a design change rather than a tuning change.
+
+It is **deliberately not fixed yet**: changing detection code invalidates every baseline under
+`evaluation/results/`, and that is a decision to take on its own rather than as a side effect of
+adding a study.
 
 ---
 
@@ -221,10 +245,24 @@ customer **89.84 HIGH**.
 
 ### The honest weakness
 
-**No out-of-time validation.** `ml_detect` fits and scores the same rows over one 90-day window. That
-is defensible for unsupervised transductive scoring — there is no label leakage, because there are no
-labels — but a bank's model-validation function will ask how it generalises, and the answer today is
-that nobody has measured it.
+**It is transductive: `ml_detect` fits and scores the same rows.** Defensible for unsupervised scoring
+— there is no label leakage, because there are no labels — but a bank's model-validation function will
+ask how it generalises, and "by design" is only a good answer if you know what the alternative costs.
+
+`evaluation/out_of_time.py` measures it: fit on the first 60 days, score the last 29. **The frozen
+model costs 0.036 precision and no recall.** That is a small number, and the useful reading is that
+the transductive shortcut is buying almost nothing — the design could be changed for the price of one
+false positive, and the reason not to is simplicity rather than accuracy.
+
+Two limits on that number, both the dataset's fault:
+
+- **No cold starts exist.** All 268 test-window customers also appear in the training window, so the
+  expensive part of out-of-time validation — customers the model has never seen — goes unmeasured.
+- **The shipped code cannot actually do this.** `LocalOutlierFactor` is built with `novelty=False`,
+  which has no `score_samples` and can only score rows it was fitted on. The study substitutes
+  `novelty=True` — identical fit, plus the scoring method the other mode withholds — and reports an
+  IsolationForest-only control so the substitution can be checked rather than trusted. Found by trying
+  to run the study, not by reading the code.
 
 ---
 
@@ -386,7 +424,7 @@ Two spellings of "repeat" were measured and coincide exactly on this dataset (�
 ≥2 from a single sender). The simpler one is implemented, and `REPEAT_RECEIVER_MIN_TXNS` documents that
 the distinction would need revisiting if that ever stops holding.
 
-### The three studies
+### The four studies
 
 - **`run_evaluation.py`** — how well does the system do? Precision/recall/FPR against all three
   definitions, plus a naive baseline (flag anyone who sent >$9,000) that the whole false-positive story
@@ -398,6 +436,11 @@ the distinction would need revisiting if that ever stops holding.
 - **`evasion.py`** — what does it cost to defeat us? Perturbs the launderers' own transactions in
   memory and re-runs the full stack per configuration. It **cannot** re-fuse, because changing an
   amount changes the features, which changes both halves.
+- **`out_of_time.py`** — does the ML half generalise forward? Fits on the first 60 days and scores the
+  last 29, holding the test rows and the ground truth fixed so that only the fitting population moves.
+  Three arms, changing one thing at a time: fit-on-test (what ships), fit-on-train, and fit-on-train
+  with the percentile cut points frozen at training time too — the last being what a deployed model
+  actually has available to it.
 
 ### Why the evasion study is the one that matters
 
@@ -454,12 +497,14 @@ In priority order, with the reason rather than just the task:
 1. **Run the IBM path.** It is built and blocked only on a Kaggle token. It converts every metric in
    the repo from "measured on data we generated" to "measured on data we did not", and it is the one
    criticism I cannot currently answer.
-2. **Out-of-time validation.** Fit on the first 60 days, score the last 30. Expect it to look worse and
-   report it that way. Note in advance that the 90-day span makes R6's 60-day dormancy structurally
-   impossible in the test window — that needs saying rather than hiding.
+2. **Fix R3's chain-origin definition.** The out-of-time study showed it is anti-monotone in data
+   volume — 46 in-degree-0 nodes over 29 days, 6 over 90 — so on production data it would find nearly
+   nothing. "Chain origin" has to be evaluated inside a time window rather than over the whole graph.
+   This is now the most concrete known defect in the detection code, and unlike the receive-only gap it
+   has a fix that does not need data the dataset lacks.
 3. **Inbound and graph features.** The 51 unreachable receive-only positives are a feature-coverage
    problem, not a threshold problem, and no amount of tuning will move them.
-4. **Revisit R3 and the HIGH threshold on real data**, where the tuning set and the evaluation set can
+4. **Revisit the HIGH threshold on real data**, where the tuning set and the evaluation set can
    differ and the choice is not circular.
 5. **Make the re-planner earn its place.** It currently declines on 5/5. Either find the query class
    where mid-run revision genuinely helps, or report that the deterministic plan is good enough and the

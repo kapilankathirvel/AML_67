@@ -176,10 +176,22 @@ Stated here so it does not have to be discovered:
   outbound behaviour. Their median ML percentile is **0.486**, and only 2 of the 63 clear the 0.95
   floor. R7 recovers 12. Closing the rest needs features that describe inbound or graph structure,
   which is a different thing from tuning a threshold.
-- **R3 (layering) is not earning its place.** 4 hits, zero true positives under every ground-truth
-  definition, and removing it *improves* precision at no recall cost. It is kept because 4 hits is
-  far too small a sample to retire a rule on, but it is not currently contributing.
-- **No out-of-time validation.** The ML fits and scores the same 90-day window.
+- **R3 (layering) is broken in a way that gets worse with more data.** 4 hits, zero true positives,
+  and removing it *improves* precision at no recall cost — but the out-of-time study found the
+  mechanism, and it is not that layering is hard to detect. R3 enumerates chains only from nodes with
+  in-degree 0, and that set collapses as history accumulates: **46 such nodes over 29 days, 28 over
+  60, 6 over the full 90.** The searched pair count falls from 2,300 to 42. The rule is anti-monotone
+  in data volume, so on a production graph where nobody has zero inbound wires it would find nothing
+  at all. Reported and pinned by a test, deliberately not yet fixed — changing detection code
+  invalidates every baseline under `evaluation/results/`, which should be a decision rather than a
+  side effect of adding a study.
+- **The ML half is transductive, and the cost of that is now measured rather than unknown.** Fitting
+  on the first 60 days and scoring the last 29 costs **0.036 precision and no recall**, so the
+  shortcut is buying very little. Two things bound that number: this dataset has no customers absent
+  from the training window, so cold-start cost goes unmeasured; and the shipped `ml_detect` cannot do
+  out-of-time scoring at all, because `LocalOutlierFactor` is constructed with `novelty=False` and has
+  no `score_samples`. The study substitutes `novelty=True` and publishes an IsolationForest-only
+  control so the substitution can be checked rather than trusted.
 - **The risk formula, bands, and thresholds are hand-set.** They are defensible and documented, but
   they are not calibrated, and calibrating them against the same 270 customers they are evaluated on
   would be circular.
