@@ -200,9 +200,29 @@ mechanical, scale-dependent defect, and the fix is not a threshold — it is tha
 be defined as a global graph property when the graph is a growing accumulation of history. It needs
 to be defined within a time window, which is a design change rather than a tuning change.
 
+**And the counterfactual says what that change would be worth.** The shipped `rule_detect`, run
+unchanged over non-overlapping partitions of the same transactions with R3's hits unioned:
+
+| Config | Flagged | True positives | Precision |
+|---|---|---|---|
+| Whole frame — what ships | 4 | **0** | **0.000** |
+| 7-day windows | 3 | **3** | **1.000** |
+| 14-day windows | 7 | 4 | 0.571 |
+| 30-day windows | 15 | 4 | 0.267 |
+
+The two sets are **disjoint**: every entity the whole-frame run flags is a false positive, every
+entity the 7-day partition flags is a launderer, and no entity appears in both. The origin collapse
+is not merely reducing R3's yield — it is selecting the wrong chains. Precision decays monotonically
+as the windows widen back toward the whole frame, which is the mechanism confirming itself.
+
+That is a counterfactual, not an implementation: unioning over a hard partition is cruder than a real
+fix, and recall stays low throughout because R3 is one typology rather than the system. The claim is
+about precision only.
+
 It is **deliberately not fixed yet**: changing detection code invalidates every baseline under
 `evaluation/results/`, and that is a decision to take on its own rather than as a side effect of
-adding a study.
+adding a study. The counterfactual does not change that sequencing argument, but it does mean the fix
+is now a costed item rather than a hunch.
 
 ---
 
@@ -501,7 +521,10 @@ In priority order, with the reason rather than just the task:
    volume — 46 in-degree-0 nodes over 29 days, 6 over 90 — so on production data it would find nearly
    nothing. "Chain origin" has to be evaluated inside a time window rather than over the whole graph.
    This is now the most concrete known defect in the detection code, and unlike the receive-only gap it
-   has a fix that does not need data the dataset lacks.
+   has a fix that does not need data the dataset lacks. It is also **costed**: a windowed counterfactual
+   over the same transactions takes R3 from 4 hits at 0.000 precision to 3 hits at 1.000, with no
+   overlap between the two sets. The bill is re-baselining four JSON files under `evaluation/results/`
+   and rewriting the numbers in three documents.
 3. **Inbound and graph features.** The 51 unreachable receive-only positives are a feature-coverage
    problem, not a threshold problem, and no amount of tuning will move them.
 4. **Revisit the HIGH threshold on real data**, where the tuning set and the evaluation set can

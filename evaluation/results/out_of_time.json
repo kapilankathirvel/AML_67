@@ -1,7 +1,7 @@
 {
   "_comment": "Regenerate with: python -m evaluation.out_of_time \u2014 everything outside 'run_metadata' is deterministic and safe to diff.",
   "run_metadata": {
-    "generated_utc": "2026-08-07T19:20:15+00:00",
+    "generated_utc": "2026-08-08T06:33:52+00:00",
     "python": "3.11.7",
     "primary_definition": "sender_only",
     "source": "synthetic"
@@ -110,6 +110,75 @@
       "pairs_searched": 42
     }
   ],
+  "r3_counterfactual": {
+    "whole_frame": {
+      "entities_flagged": 4,
+      "precision": 0.0,
+      "recall": 0.0,
+      "true_positives": 0
+    },
+    "windowed": [
+      {
+        "window_days": 7,
+        "windows": 13,
+        "entities_flagged": 3,
+        "hits_per_window": [
+          0,
+          0,
+          0,
+          1,
+          0,
+          0,
+          1,
+          0,
+          0,
+          1,
+          0,
+          0,
+          0
+        ],
+        "new_vs_whole_frame": 3,
+        "missed_vs_whole_frame": 4,
+        "precision": 1.0,
+        "recall": 0.058823529411764705,
+        "true_positives": 3
+      },
+      {
+        "window_days": 14,
+        "windows": 7,
+        "entities_flagged": 7,
+        "hits_per_window": [
+          0,
+          1,
+          0,
+          3,
+          2,
+          1,
+          0
+        ],
+        "new_vs_whole_frame": 7,
+        "missed_vs_whole_frame": 4,
+        "precision": 0.5714285714285714,
+        "recall": 0.0784313725490196,
+        "true_positives": 4
+      },
+      {
+        "window_days": 30,
+        "windows": 3,
+        "entities_flagged": 15,
+        "hits_per_window": [
+          4,
+          7,
+          6
+        ],
+        "new_vs_whole_frame": 14,
+        "missed_vs_whole_frame": 3,
+        "precision": 0.26666666666666666,
+        "recall": 0.0784313725490196,
+        "true_positives": 4
+      }
+    ]
+  },
   "arms": [
     {
       "arm": "Rules only (no ML \u2014 the floor)",

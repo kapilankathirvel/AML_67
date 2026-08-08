@@ -182,9 +182,13 @@ Stated here so it does not have to be discovered:
   in-degree 0, and that set collapses as history accumulates: **46 such nodes over 29 days, 28 over
   60, 6 over the full 90.** The searched pair count falls from 2,300 to 42. The rule is anti-monotone
   in data volume, so on a production graph where nobody has zero inbound wires it would find nothing
-  at all. Reported and pinned by a test, deliberately not yet fixed — changing detection code
-  invalidates every baseline under `evaluation/results/`, which should be a decision rather than a
-  side effect of adding a study.
+  at all. And a counterfactual — the shipped rule run unchanged over non-overlapping partitions of
+  the same transactions — shows the collapse is picking the *wrong* chains rather than merely fewer:
+  the whole-frame run's 4 hits contain **zero** launderers, the 7-day partition's 3 hits are **all**
+  launderers, and the two sets do not overlap. Precision 0.000 → 1.000 on identical data. Reported
+  and pinned by tests, deliberately not yet fixed — changing detection code invalidates every
+  baseline under `evaluation/results/`, which should be a decision rather than a side effect of
+  adding a study. It is now a costed decision rather than a speculative one.
 - **The ML half is transductive, and the cost of that is now measured rather than unknown.** Fitting
   on the first 60 days and scoring the last 29 costs **0.036 precision and no recall**, so the
   shortcut is buying very little. Two things bound that number: this dataset has no customers absent

@@ -1,6 +1,6 @@
 # Two jobs, split by measurement rather than by intuition.
 #
-# The full suite takes ~22 minutes (421 tests: 418 passed, 3 skipped), almost
+# The full suite takes ~24 minutes (427 tests: 424 passed, 3 skipped), almost
 # all of it in tests that run the real feature pipeline over 2,002 transactions
 # — `feature_engineer` costs ~27s and several test classes pay it per test. That
 # is too slow to sit between a push and a green tick, so `fast` runs everything
@@ -77,7 +77,7 @@ jobs:
     name: Full suite and published baselines
     # Nightly and on demand only. Running this per push would put a 50-minute
     # wait in front of every commit to buy very little: the fast job already
-    # covers 291 of the 421 tests, and the seven excluded files test detection
+    # covers 291 of the 427 tests, and the seven excluded files test detection
     # code that a documentation or agent-layer change cannot reach.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest

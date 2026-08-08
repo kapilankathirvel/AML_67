@@ -513,7 +513,7 @@ differently for it. Cold starts add ~30s. If a host ever does run out of room, H
 gives 16 GB and Docker, and can run both processes as originally designed.
 
 **Continuous integration** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) is split by
-measurement, not intuition. The full suite is **421 tests in ~22 minutes**, and almost all of that sits
+measurement, not intuition. The full suite is **427 tests in ~24 minutes**, and almost all of that sits
 in seven files that drive the real feature pipeline — `feature_engineer` over 2,002 transactions costs
 ~27s, and several test classes pay it per test. So:
 
@@ -901,6 +901,28 @@ Reported rather than fixed: changing detection code would invalidate every basel
 study. It is pinned by `tests/test_out_of_time.py::test_r3_search_space_shrinks_as_the_window_grows`, so
 whoever fixes it will be told that this section needs revisiting with it.
 
+**What the fix would be worth, measured rather than guessed.** The shipped `rule_detect` was run
+unchanged over non-overlapping partitions of the *same* transactions, with the R3 hits unioned. No
+detection code changes; this is a counterfactual, not a proposed implementation.
+
+| Config | Windows | Flagged | True positives | Precision | Recall | New vs whole frame | Missed |
+|---|---|---|---|---|---|---|---|
+| Whole frame — **what ships** | 1 | 4 | **0** | **0.000** | 0.000 | — | — |
+| 7-day windows | 13 | 3 | **3** | **1.000** | 0.059 | 3 | 4 |
+| 14-day windows | 7 | 7 | 4 | 0.571 | 0.078 | 7 | 4 |
+| 30-day windows | 3 | 15 | 4 | 0.267 | 0.078 | 14 | 3 |
+
+**The shipped R3's 4 hits are all false positives; the 7-day variant's 3 are all launderers, and the two
+sets do not overlap.** So the in-degree-0 collapse is not merely shrinking R3's yield — it is leaving
+behind precisely the wrong chains. Precision goes 0.000 → 1.000 on identical data, and decays back toward
+the shipped result as the windows widen, which is the mechanism showing itself.
+
+Two things this does not claim. Unioning hits across a hard partition is cruder than a real fix, which
+would evaluate chain origin within a rolling window and would have to decide what a chain spanning a
+boundary means. And recall stays low throughout — R3 is one typology, not the system — so the claim is
+about precision only. What it does establish is that fixing R3 is worth something concrete rather than
+speculative.
+
 ## Limitations
 
 - **LLM path is provider-agnostic (Gemini, OpenAI, Groq, or local Ollama) and always has a working
@@ -951,7 +973,9 @@ whoever fixes it will be told that this section needs revisiting with it.
   IsolationForest-only control to show the substitution is not carrying the result.
 - **R3's recall degrades as the dataset grows.** It enumerates layering chains only from in-degree-0 nodes,
   and that set shrinks with history: 46 such nodes over 29 days, 6 over 90. On a production graph it would
-  have almost nowhere to start. Known, measured, and deliberately not yet fixed — see
+  have almost nowhere to start. Worse, its 4 current hits are *all* false positives while a windowed
+  counterfactual over the same data finds 3 entities that are all launderers — the collapse is selecting
+  the wrong chains, not just fewer of them. Known, measured, and deliberately not yet fixed — see
   [above](#what-this-study-found-that-it-was-not-looking-for).
 - Batch analysis over a sample dataset, not live streaming — explicitly in scope per the brief.
 - Synthetic data documents its own generation assumptions (seed, thresholds, ring sizes) in

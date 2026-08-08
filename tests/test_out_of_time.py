@@ -32,6 +32,7 @@ from evaluation.out_of_time import (
     layering_search_space,
     load_canonical,
     ml_arm,
+    partition_by_days,
     rule_reachability,
     split_by_time,
     window_artifacts,
@@ -262,6 +263,103 @@ def test_r3_search_space_shrinks_as_the_window_grows(canonical, windows):
         > by["full"]["sources_in_degree_0"]
     )
     assert by["full"]["pairs_searched"] < by["test"]["pairs_searched"] / 10
+
+
+# ---------------------------------------------------------------------------
+# The R3 counterfactual
+# ---------------------------------------------------------------------------
+
+
+def test_partition_is_exhaustive_and_non_overlapping(canonical):
+    """Every transaction lands in exactly one window.
+
+    This is what makes the unioned hit count comparable to the whole-frame run:
+    the windowed arm sees the same rows, cut differently. If a row appeared in
+    two windows a chain could be found twice, and if a row appeared in none the
+    comparison would be against a smaller dataset rather than a re-cut one.
+    """
+    df, _ = canonical
+    for days in (7, 14, 30):
+        parts = partition_by_days(df, days)
+        seen: list[int] = []
+        for chunk in parts:
+            seen.extend(chunk.index.tolist())
+        assert len(seen) == len(set(seen)), f"{days}d windows overlap"
+        assert set(seen) == set(df.index.tolist()), f"{days}d windows lose rows"
+
+
+def test_partition_keeps_the_short_final_window(canonical):
+    """89 days does not divide by 30, and the remainder is kept rather than dropped.
+
+    Dropping it would silently shorten the dataset the windowed arm is scored
+    on, which would make its recall incomparable to the whole-frame row.
+    """
+    df, _ = canonical
+    ts = pd.to_datetime(df["timestamp"])
+    span = (ts.max() - ts.min()).days
+    parts = partition_by_days(df, 30)
+
+    assert span % 30 != 0, "pick a window size that does not divide the span"
+    assert len(parts) == span // 30 + 1
+    last = pd.to_datetime(parts[-1]["timestamp"])
+    assert (last.max() - last.min()).days < 30
+
+
+def test_counterfactual_whole_frame_row_matches_the_shipped_r3(payload):
+    """The baseline row must be the rule as it ships, not a re-derivation of it.
+
+    Compares distinct entities against a hit count, which are only equal because
+    no entity carries two R3 hits on this dataset. That is the weaker of the two
+    checks it looks like, and it is still the one worth having: it catches the
+    counterfactual's baseline drifting away from the published rule output.
+    """
+    wf = payload["r3_counterfactual"]["whole_frame"]
+    published = {r["rule"]: r["full_90d"] for r in payload["rule_reachability"]}
+    assert wf["entities_flagged"] == published["R3"]
+
+
+def test_counterfactual_recovers_chains_the_whole_frame_cannot_reach(payload):
+    """The finding, pinned: shorter windows flip R3 from all-wrong to all-right.
+
+    Whole-frame R3 flags nobody who is a launderer; the 7-day partition flags
+    only launderers, and the two sets are disjoint. If R3's origin selection is
+    ever fixed this test fails, which is the intent — the docstring's claim that
+    the fix is worth something concrete has to fall with it.
+    """
+    cf = payload["r3_counterfactual"]
+    wf = cf["whole_frame"]
+    seven = next(r for r in cf["windowed"] if r["window_days"] == 7)
+
+    assert wf["true_positives"] == 0
+    assert wf["precision"] == 0.0
+    assert seven["precision"] == 1.0
+    assert seven["true_positives"] == seven["entities_flagged"] > 0
+    # Disjoint: everything the 7-day arm finds is new, and everything the whole
+    # frame found is missed.
+    assert seven["new_vs_whole_frame"] == seven["entities_flagged"]
+    assert seven["missed_vs_whole_frame"] == wf["entities_flagged"]
+
+
+def test_counterfactual_precision_decays_as_windows_widen(payload):
+    """The mechanism confirming itself.
+
+    As each window approaches the whole frame the in-degree-0 origin set
+    collapses the same way, so precision should fall back toward the shipped
+    result. A non-monotone curve would mean something other than the search
+    space is driving the difference.
+    """
+    rows = sorted(payload["r3_counterfactual"]["windowed"], key=lambda r: r["window_days"])
+    precisions = [r["precision"] for r in rows]
+    assert precisions == sorted(precisions, reverse=True)
+    assert precisions[-1] > payload["r3_counterfactual"]["whole_frame"]["precision"]
+
+
+def test_counterfactual_union_is_no_larger_than_the_sum_of_its_windows(payload):
+    """A union cannot exceed the parts, and equality would mean no entity was
+    ever flagged in two different windows — worth knowing either way."""
+    for r in payload["r3_counterfactual"]["windowed"]:
+        assert r["entities_flagged"] <= sum(r["hits_per_window"])
+        assert r["windows"] == len(r["hits_per_window"])
 
 
 # ---------------------------------------------------------------------------

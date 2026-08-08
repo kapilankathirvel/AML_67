@@ -81,6 +81,16 @@ and it is deliberately NOT fixed here: changing detection code would invalidate
 every published baseline in `evaluation/results/`, which is a decision to take
 on its own rather than as a side effect of adding a study.
 
+§4 then asks what that decision would be worth, without taking it. The shipped
+`rule_detect` is run unchanged over non-overlapping partitions of the same
+transactions and the R3 hits are unioned — a counterfactual, not a proposed
+implementation. The whole-frame R3 flags 4 entities and none of them is a
+launderer; the 7-day partition flags 3 and all of them are, with **zero overlap
+between the two sets**. Precision 0.000 → 1.000 on identical data. So the
+in-degree-0 collapse is not merely shrinking R3's yield, it is leaving behind
+precisely the wrong chains, and the fix is worth something concrete rather than
+speculative.
+
 The LOF finding
 ---------------
 `ml_detect` constructs `LocalOutlierFactor(novelty=False)`, which has no
@@ -91,7 +101,7 @@ LOF with `novelty=True`, which changes nothing about the fit (the training
 scores are identical either way) and only exposes the scoring method that
 novelty=False withholds.
 
-That substitution is a confound, so §3 reports an IF-only control alongside. If
+That substitution is a confound, so §5 reports an IF-only control alongside. If
 the IF-only drop matches the IF+LOF drop, the substitution is not carrying the
 result.
 """
@@ -340,6 +350,102 @@ def ml_arm(
 
 
 # ---------------------------------------------------------------------------
+# The R3 counterfactual — what would the fix be worth?
+# ---------------------------------------------------------------------------
+
+
+def partition_by_days(df: pd.DataFrame, days: int) -> list[pd.DataFrame]:
+    """Cut the frame into NON-OVERLAPPING windows of `days`.
+
+    Non-overlapping matters. Sliding windows would let the same chain be found
+    from several offsets and counted each time, which would manufacture the
+    result this counterfactual is supposed to test. A partition re-cuts exactly
+    the same transactions, so any extra hit is a chain the whole-frame run could
+    not see rather than one it saw repeatedly.
+
+    The final window is short if the span does not divide evenly. It is kept:
+    dropping it would silently discard transactions and make the comparison
+    unfair in the counterfactual's favour.
+    """
+    ts = pd.to_datetime(df["timestamp"])
+    start, end = ts.min(), ts.max()
+    out: list[pd.DataFrame] = []
+    edge = start
+    while edge <= end:
+        stop = edge + pd.Timedelta(days=days)
+        chunk = df[(ts >= edge) & (ts < stop)]
+        if len(chunk):
+            out.append(chunk.copy())
+        edge = stop
+    return out
+
+
+def r3_counterfactual(
+    df: pd.DataFrame,
+    customers: Any,
+    gt: Any,
+    window_sizes: tuple[int, ...] = (7, 14, 30),
+) -> dict[str, Any]:
+    """What R3 would find if chain origin were a windowed property.
+
+    NOT A PROPOSED IMPLEMENTATION, and nothing here touches detection code. The
+    shipped `rule_detect` runs verbatim over each slice and the R3 hits are
+    unioned. That is deliberately cruder than a real fix would be, but it tests
+    the one thing worth testing: whether the in-degree-0 origin set is the
+    binding constraint. If it is, re-cutting the same 90 days into shorter
+    windows recovers chains the whole-frame run cannot reach.
+
+    Reported with precision, not just hit counts. R3 currently finds 4 chains
+    and zero true positives, so "the windowed variant finds more" is only good
+    news if the extra chains are launderers. If precision stays at zero, the
+    honest conclusion is that the search space is not the only thing wrong with
+    R3 — which is a different finding, and a more useful one than a bigger
+    number.
+    """
+    positives = gt.positives(PRIMARY_DEFINITION)
+    population = gt.all_customers
+
+    def _r3_entities(hits) -> set[str]:
+        return {str(h["entity_id"]) for h in hits if str(h.get("rule_id")) == "R3"}
+
+    whole = window_artifacts(df, customers)
+    whole_entities = _r3_entities(whole["rule_hits"])
+    baseline = evaluate(whole_entities, positives, population)
+
+    rows: list[dict[str, Any]] = []
+    for days in window_sizes:
+        slices = partition_by_days(df, days)
+        found: set[str] = set()
+        per_window: list[int] = []
+        for chunk in slices:
+            hits = _r3_entities(window_artifacts(chunk, customers)["rule_hits"])
+            per_window.append(len(hits))
+            found |= hits
+        metrics = evaluate(found, positives, population)
+        rows.append({
+            "window_days": days,
+            "windows": len(slices),
+            "entities_flagged": len(found),
+            "hits_per_window": per_window,
+            "new_vs_whole_frame": len(found - whole_entities),
+            "missed_vs_whole_frame": len(whole_entities - found),
+            "precision": metrics.precision,
+            "recall": metrics.recall,
+            "true_positives": metrics.true_positives,
+        })
+
+    return {
+        "whole_frame": {
+            "entities_flagged": len(whole_entities),
+            "precision": baseline.precision,
+            "recall": baseline.recall,
+            "true_positives": baseline.true_positives,
+        },
+        "windowed": rows,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Scoring
 # ---------------------------------------------------------------------------
 
@@ -472,7 +578,7 @@ def render(payload: dict[str, Any]) -> str:
             "degradation at all.** That is a property of the synthetic generator, which "
             "gives each customer activity across the whole span. Real out-of-time "
             "validation is mostly a question about customers the model has never seen, "
-            "and this dataset contains none — so the drop reported in §4 is a *lower "
+            "and this dataset contains none — so the drop reported in §5 is a *lower "
             "bound* on what a frozen model would cost in production."
         )
     out.append("")
@@ -514,7 +620,52 @@ def render(payload: dict[str, Any]) -> str:
     )
     out.append("")
 
-    out.append("### 4. Out-of-time degradation")
+    cf = payload["r3_counterfactual"]
+    wf = cf["whole_frame"]
+    out.append("### 4. What fixing R3 would be worth — counterfactual, not shipped")
+    out.append("")
+    out.append(
+        "The same shipped `rule_detect`, run over non-overlapping partitions of the same "
+        "transactions, with the R3 hits unioned. No detection code is changed. If the "
+        "in-degree-0 origin set is the binding constraint, re-cutting the identical data "
+        "into shorter windows should recover chains the whole-frame run cannot reach."
+    )
+    out.append("")
+    out.append("| Config | Windows | Flagged | True positives | Precision | Recall | New vs whole frame | Missed |")
+    out.append("|---|---|---|---|---|---|---|---|")
+    out.append(
+        f"| Whole frame — **what ships** | 1 | {wf['entities_flagged']} | "
+        f"{wf['true_positives']} | {wf['precision']:.3f} | {wf['recall']:.3f} | — | — |"
+    )
+    for r in cf["windowed"]:
+        out.append(
+            f"| {r['window_days']}-day windows | {r['windows']} | {r['entities_flagged']} | "
+            f"{r['true_positives']} | {r['precision']:.3f} | {r['recall']:.3f} | "
+            f"{r['new_vs_whole_frame']} | {r['missed_vs_whole_frame']} |"
+        )
+    out.append("")
+
+    best = min(cf["windowed"], key=lambda r: r["window_days"])
+    out.append(
+        f"**The shipped R3's {wf['entities_flagged']} hits are all false positives; the "
+        f"{best['window_days']}-day variant's {best['entities_flagged']} are all launderers, "
+        f"and the two sets do not overlap** ({best['new_vs_whole_frame']} new, "
+        f"{best['missed_vs_whole_frame']} of the originals dropped). Precision goes "
+        f"{wf['precision']:.3f} → {best['precision']:.3f} on identical data. The decay across "
+        "widening windows is the mechanism showing itself: as each window approaches the whole "
+        "frame, precision falls back toward the shipped result."
+    )
+    out.append("")
+    out.append(
+        "**This is a measurement, not a proposed implementation.** Unioning hits across a "
+        "partition is cruder than a real fix, which would evaluate chain origin within a "
+        "rolling window rather than a hard partition, and would have to decide what a chain "
+        "spanning a boundary means. Recall stays low throughout — R3 is one typology, not the "
+        "system — so the claim is about precision only."
+    )
+    out.append("")
+
+    out.append("### 5. Out-of-time degradation")
     out.append("")
     out.append("All rows: same test-window transactions, same ground truth. Only the ML half moves.")
     out.append("")
@@ -650,6 +801,13 @@ def build(train_days: int = DEFAULT_TRAIN_DAYS, source: str = "synthetic") -> di
             f"train {train_days}d": train_df,
             f"full {span_days}d": df,
         }),
+        # Scored against the WHOLE dataset's ground truth over the full roster,
+        # not the test window's — this asks what R3 would find across all 90
+        # days, so restricting it to the out-of-time population would be the
+        # wrong denominator.
+        "r3_counterfactual": r3_counterfactual(
+            df, customers, ground_truth_from_frames(df, roster)
+        ),
         "arms": arms,
         "drop": {
             "in_time_recall": a["recall"],
