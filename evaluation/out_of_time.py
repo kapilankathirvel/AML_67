@@ -65,31 +65,34 @@ Three things that are wrong with this study, stated up front
 
 What this study found that it was not looking for
 -------------------------------------------------
-R3 reports MORE layering chains on 29 days of data (6) than on the full 90 (4).
+R3 reported MORE layering chains on 29 days of data (6) than on the full 90 (4).
 A hit count that falls as evidence accumulates is not a rounding artifact, so §3
-of the output measures the cause: `rules.py:311` starts chain enumeration only
-at nodes with **in-degree 0** in the wire/transfer subgraph. Measured on this
-dataset — 46 such nodes in the 29-day window, 28 in 60 days, **6** in 90 days.
-The searched (src, snk) pair count therefore collapses from 2,300 to 42 as the
-window grows.
+of the output measures the cause: chain enumeration started only at nodes with
+**in-degree 0** in the wire/transfer subgraph. Measured on this dataset — 46
+such nodes in the 29-day window, 28 in 60 days, **6** in 90 days. The searched
+(src, snk) pair count therefore collapsed from 2,300 to 42 as the window grew.
 
-The rule is anti-monotone in data volume by construction. Extrapolated to a
+The rule was anti-monotone in data volume by construction. Extrapolated to a
 production graph with years of history, virtually no customer has zero inbound
-wires and R3 has almost nowhere to begin, so it would approach zero recall on
-exactly the datasets it matters on. This is a defect in R3, not in the split,
-and it is deliberately NOT fixed here: changing detection code would invalidate
-every published baseline in `evaluation/results/`, which is a decision to take
-on its own rather than as a side effect of adding a study.
+wires and R3 would have had almost nowhere to begin, approaching zero recall on
+exactly the datasets it matters on. This was a defect in R3, not in the split.
 
-§4 then asks what that decision would be worth, without taking it. The shipped
-`rule_detect` is run unchanged over non-overlapping partitions of the same
-transactions and the R3 hits are unioned — a counterfactual, not a proposed
-implementation. The whole-frame R3 flags 4 entities and none of them is a
-launderer; the 7-day partition flags 3 and all of them are, with **zero overlap
-between the two sets**. Precision 0.000 → 1.000 on identical data. So the
-in-degree-0 collapse is not merely shrinking R3's yield, it is leaving behind
-precisely the wrong chains, and the fix is worth something concrete rather than
-speculative.
+§4 measured what that decision would be worth, without taking it: the shipped
+`rule_detect` run unchanged over non-overlapping partitions of the same
+transactions, R3 hits unioned. The whole-frame R3 flagged 4 entities, none of
+them a launderer; the 7-day partition flagged 3, all of them launderers, with
+**zero overlap between the two sets**. Precision 0.000 → 1.000 on identical
+data. The collapse was not merely shrinking R3's yield, it was leaving behind
+precisely the wrong chains.
+
+**Both defects have since been fixed** (`rules.py`, `_run_r3_layering`): hop
+ordering and magnitude continuity are enforced, and chain origin is evaluated
+within the pass-through window instead of over the accumulated graph. R3 now
+finds all 5 generated layering chains and reports 6 hits at 0.833 precision
+against the previous 4 at 0.000. §3 and §4 are kept as the evidence that
+motivated the change and as the regression test for it — a rule with a windowed
+origin definition should be roughly indifferent to how the frame is cut, and §4
+now shows that it is.
 
 The LOF finding
 ---------------
@@ -386,21 +389,27 @@ def r3_counterfactual(
     gt: Any,
     window_sizes: tuple[int, ...] = (7, 14, 30),
 ) -> dict[str, Any]:
-    """What R3 would find if chain origin were a windowed property.
+    """Is R3 sensitive to how the same transactions are cut into windows?
 
-    NOT A PROPOSED IMPLEMENTATION, and nothing here touches detection code. The
-    shipped `rule_detect` runs verbatim over each slice and the R3 hits are
-    unioned. That is deliberately cruder than a real fix would be, but it tests
-    the one thing worth testing: whether the in-degree-0 origin set is the
-    binding constraint. If it is, re-cutting the same 90 days into shorter
-    windows recovers chains the whole-frame run cannot reach.
+    Nothing here touches detection code: the shipped `rule_detect` runs verbatim
+    over each slice and the R3 hits are unioned.
 
-    Reported with precision, not just hit counts. R3 currently finds 4 chains
-    and zero true positives, so "the windowed variant finds more" is only good
-    news if the extra chains are launderers. If precision stays at zero, the
-    honest conclusion is that the search space is not the only thing wrong with
-    R3 — which is a different finding, and a more useful one than a bigger
-    number.
+    Written as a counterfactual while chain origin was still an in-degree-0
+    property of the whole graph, to measure what fixing that would be worth. It
+    measured a lot — whole frame 4 flagged and **zero** true positives against
+    the 7-day partition's 3 flagged and **three** true positives, with the two
+    sets disjoint. Re-cutting identical data inverted the answer, which is what a
+    global origin definition does to a rule.
+
+    Kept afterwards as the **regression test for the fix**. A windowed origin
+    definition should leave the rule roughly indifferent to partitioning, and in
+    particular should never do better on a slice than on everything: a partition
+    can only discard chains that straddle its boundaries. If a short window ever
+    beats the whole frame by a wide margin again, origin has regressed to a
+    property of the accumulated graph.
+
+    Reported with precision rather than hit counts, because "the windowed variant
+    finds more" is only good news if the extra chains are launderers.
     """
     positives = gt.positives(PRIMARY_DEFINITION)
     population = gt.all_customers
@@ -513,15 +522,20 @@ def rule_reachability(train_hits, test_hits, full_hits) -> list[dict[str, Any]]:
 
 
 def layering_search_space(windows: dict[str, pd.DataFrame]) -> list[dict[str, Any]]:
-    """Why R3 finds fewer chains as the window grows.
+    """Why R3 used to find fewer chains as the window grew.
 
-    R3 enumerates paths from in-degree-0 nodes to out-degree-0 nodes
-    (`rules.py:311`). Both sets shrink as history accumulates — a node that
-    looked like a chain origin over 29 days has received something by day 90 —
-    so the search space contracts even though the evidence expands.
+    R3 once enumerated paths from in-degree-0 nodes to out-degree-0 nodes. Both
+    sets shrink as history accumulates — a node that looked like a chain origin
+    over 29 days has received something by day 90 — so the search space
+    contracted even though the evidence expanded.
 
-    Rebuilds the same wire/transfer subgraph R3 builds, deduplicated the same
-    way, so these counts are the ones the rule actually searched.
+    **This no longer describes R3.** Chain origin is now evaluated inside the
+    pass-through window, and the search is a forward walk over transactions
+    rather than an enumeration over (source, sink) pairs. What is measured here
+    is the *data*: how a global in-degree-0 origin set collapses with history.
+    It is kept as the evidence that motivated the change, and because the same
+    collapse would befall any rule that defines an entry point as a property of
+    an accumulating graph.
     """
     rows = []
     for label, frame in windows.items():
@@ -595,13 +609,15 @@ def render(payload: dict[str, Any]) -> str:
         )
     out.append("")
 
-    out.append("### 3. Why R3 finds fewer chains as the window grows")
+    out.append("### 3. Why R3's chain-origin definition had to change")
     out.append("")
     r3 = next(r for r in payload["rule_reachability"] if r["rule"] == "R3")
     out.append(
-        f"R3 reports {r3['test_30d']} hits on {td} days and {r3['full_90d']} on the full "
-        f"{sd}. It enumerates paths only from in-degree-0 to out-degree-0 nodes "
-        "(`rules.py:311`), and both sets shrink as history accumulates:"
+        "This study found R3 reporting *more* layering chains on a short window than on the "
+        "full dataset — a hit count that fell as evidence accumulated. The cause was that "
+        "chain origins were selected as in-degree-0 nodes in the whole-frame subgraph, and "
+        "that set collapses as history arrives. The table is a property of the data, "
+        "measured the same way R3 used to select origins:"
     )
     out.append("")
     out.append("| Window | Eligible txns | Nodes | Edges | Sources (in-deg 0) | Sinks (out-deg 0) | Pairs searched |")
@@ -613,22 +629,35 @@ def render(payload: dict[str, Any]) -> str:
         )
     out.append("")
     out.append(
-        "**R3 is anti-monotone in data volume.** More evidence gives it a smaller search "
-        "space, not a larger one. On a production graph with years of history almost no "
-        "customer has zero inbound wires, so R3 would approach zero recall on exactly the "
-        "datasets that matter. Reported, not fixed — see the module docstring."
+        "Under that definition R3 was **anti-monotone in data volume**: more evidence gave it "
+        "a smaller search space, and on a production graph where almost nobody has zero "
+        "inbound wires it would have had nowhere to begin. Every one of the 5 generated "
+        "layering chains has an origin with in-degree ≥ 1, so none of them was ever searched."
+    )
+    out.append("")
+    out.append(
+        "**Fixed.** Origin is now a property of the chain in time — funds enter at the anchor "
+        "if the anchor received nothing within the pass-through window before sending — which "
+        "does not decay as history accumulates. R3 now reports "
+        f"{r3['full_90d']} hits on the full {sd} days against {r3['test_30d']} on {td}. The "
+        "table above is kept as the evidence that motivated the change."
     )
     out.append("")
 
     cf = payload["r3_counterfactual"]
     wf = cf["whole_frame"]
-    out.append("### 4. What fixing R3 would be worth — counterfactual, not shipped")
+    out.append("### 4. Is R3 still sensitive to how the data is cut?")
     out.append("")
     out.append(
-        "The same shipped `rule_detect`, run over non-overlapping partitions of the same "
-        "transactions, with the R3 hits unioned. No detection code is changed. If the "
-        "in-degree-0 origin set is the binding constraint, re-cutting the identical data "
-        "into shorter windows should recover chains the whole-frame run cannot reach."
+        "The shipped `rule_detect`, run over non-overlapping partitions of the same "
+        "transactions with the R3 hits unioned. This was built as a counterfactual while the "
+        "in-degree-0 origin defect was still live, and it measured the damage: whole frame 4 "
+        "flagged and **zero** true positives, 7-day partitions 3 flagged and **all three** "
+        "launderers, with no overlap between the two sets. Re-cutting identical data changed "
+        "the answer completely, which is what a global origin definition does.\n\n"
+        "It is kept as the regression test for the fix. A rule whose origin definition is "
+        "windowed should be roughly indifferent to how the frame is partitioned, and should "
+        "not do *better* on short windows than on everything."
     )
     out.append("")
     out.append("| Config | Windows | Flagged | True positives | Precision | Recall | New vs whole frame | Missed |")
@@ -645,23 +674,21 @@ def render(payload: dict[str, Any]) -> str:
         )
     out.append("")
 
-    best = min(cf["windowed"], key=lambda r: r["window_days"])
+    best = max(cf["windowed"], key=lambda r: r["precision"])
     out.append(
-        f"**The shipped R3's {wf['entities_flagged']} hits are all false positives; the "
-        f"{best['window_days']}-day variant's {best['entities_flagged']} are all launderers, "
-        f"and the two sets do not overlap** ({best['new_vs_whole_frame']} new, "
-        f"{best['missed_vs_whole_frame']} of the originals dropped). Precision goes "
-        f"{wf['precision']:.3f} → {best['precision']:.3f} on identical data. The decay across "
-        "widening windows is the mechanism showing itself: as each window approaches the whole "
-        "frame, precision falls back toward the shipped result."
+        f"**The whole frame is no longer the worst way to run R3.** It flags "
+        f"{wf['entities_flagged']} at {wf['precision']:.3f} precision, and the best partition "
+        f"({best['window_days']}-day) reaches {best['precision']:.3f} — the ordering that used "
+        "to run the other way. Partitioning now discards evidence rather than revealing it: "
+        "chains that straddle a boundary are lost, which is why the windowed rows are no "
+        "better than the whole-frame row and sometimes worse."
     )
     out.append("")
     out.append(
-        "**This is a measurement, not a proposed implementation.** Unioning hits across a "
-        "partition is cruder than a real fix, which would evaluate chain origin within a "
-        "rolling window rather than a hard partition, and would have to decide what a chain "
-        "spanning a boundary means. Recall stays low throughout — R3 is one typology, not the "
-        "system — so the claim is about precision only."
+        "The remaining spread across window sizes is small and is a partitioning artifact, not "
+        "a property of the rule. Recall stays low throughout — R3 is one typology, not the "
+        "system — so the claim here is about precision and about the *direction* of the "
+        "sensitivity, which has reversed."
     )
     out.append("")
 

@@ -1,0 +1,128 @@
+{
+  "_comment": "Regenerate with: python -m evaluation.run_evaluation \u2014 'results' and 'ground_truth' are deterministic and safe to diff between runs; 'run_metadata' is not.",
+  "run_metadata": {
+    "generated_utc": "2026-08-08T07:53:37+00:00",
+    "python": "3.11.7",
+    "deterministic_run": true
+  },
+  "dataset": {
+    "transactions_csv": "data/sample/aml_sample.csv",
+    "customers_csv": "data/sample/aml_sample_customers.csv"
+  },
+  "ground_truth": {
+    "customers_total": 270,
+    "labelled_transactions": 202,
+    "positives_sender_only": 51,
+    "positives_sender_or_receiver": 114,
+    "positives_sender_or_repeat_receiver": 84,
+    "positives_receive_only": 63,
+    "incidental_receivers_excluded": 30
+  },
+  "results": {
+    "sender_only": {
+      "naive": {
+        "flagged": 259,
+        "true_positives": 51,
+        "false_positives": 208,
+        "false_negatives": 0,
+        "true_negatives": 11,
+        "precision": 0.1969111969111969,
+        "recall": 1.0,
+        "f1": 0.3290322580645161,
+        "false_positive_rate": 0.9497716894977168
+      },
+      "any_flag": {
+        "flagged": 42,
+        "true_positives": 27,
+        "false_positives": 15,
+        "false_negatives": 24,
+        "true_negatives": 204,
+        "precision": 0.6428571428571429,
+        "recall": 0.5294117647058824,
+        "f1": 0.5806451612903226,
+        "false_positive_rate": 0.0684931506849315
+      },
+      "high_only": {
+        "flagged": 28,
+        "true_positives": 23,
+        "false_positives": 5,
+        "false_negatives": 28,
+        "true_negatives": 214,
+        "precision": 0.8214285714285714,
+        "recall": 0.45098039215686275,
+        "f1": 0.5822784810126583,
+        "false_positive_rate": 0.0228310502283105
+      }
+    },
+    "sender_or_receiver": {
+      "naive": {
+        "flagged": 259,
+        "true_positives": 109,
+        "false_positives": 150,
+        "false_negatives": 5,
+        "true_negatives": 6,
+        "precision": 0.42084942084942084,
+        "recall": 0.956140350877193,
+        "f1": 0.5844504021447722,
+        "false_positive_rate": 0.9615384615384616
+      },
+      "any_flag": {
+        "flagged": 42,
+        "true_positives": 40,
+        "false_positives": 2,
+        "false_negatives": 74,
+        "true_negatives": 154,
+        "precision": 0.9523809523809523,
+        "recall": 0.3508771929824561,
+        "f1": 0.5128205128205128,
+        "false_positive_rate": 0.01282051282051282
+      },
+      "high_only": {
+        "flagged": 28,
+        "true_positives": 28,
+        "false_positives": 0,
+        "false_negatives": 86,
+        "true_negatives": 156,
+        "precision": 1.0,
+        "recall": 0.24561403508771928,
+        "f1": 0.3943661971830986,
+        "false_positive_rate": 0.0
+      }
+    },
+    "sender_or_repeat_receiver": {
+      "naive": {
+        "flagged": 259,
+        "true_positives": 81,
+        "false_positives": 178,
+        "false_negatives": 3,
+        "true_negatives": 8,
+        "precision": 0.3127413127413127,
+        "recall": 0.9642857142857143,
+        "f1": 0.47230320699708456,
+        "false_positive_rate": 0.956989247311828
+      },
+      "any_flag": {
+        "flagged": 42,
+        "true_positives": 39,
+        "false_positives": 3,
+        "false_negatives": 45,
+        "true_negatives": 183,
+        "precision": 0.9285714285714286,
+        "recall": 0.4642857142857143,
+        "f1": 0.6190476190476191,
+        "false_positive_rate": 0.016129032258064516
+      },
+      "high_only": {
+        "flagged": 28,
+        "true_positives": 28,
+        "false_positives": 0,
+        "false_negatives": 56,
+        "true_negatives": 186,
+        "precision": 1.0,
+        "recall": 0.3333333333333333,
+        "f1": 0.5,
+        "false_positive_rate": 0.0
+      }
+    }
+  }
+}

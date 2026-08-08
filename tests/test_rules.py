@@ -271,6 +271,57 @@ class TestR3Layering:
         for h in hits:
             assert abs(h["weight"] - 0.80) < 0.001
 
+    def test_chains_run_forward_in_time(self, full_df: pd.DataFrame) -> None:
+        """Every reported chain must be a sequence that could actually have happened.
+
+        R3 declared a 48-hour pass-through window and a ±30% magnitude tolerance
+        in its constants and in AML_LOGIC.md, and enforced neither: it searched a
+        graph with time collapsed out of it, having first reduced each
+        sender→receiver pair to its max-amount transaction. Measured on the full
+        dataset, 4 of 4 reported chains ran out of chronological order, spanning
+        32 to 71 days, with hop-to-hop amounts drifting by up to 5252%.
+
+        Asserted on the full frame rather than the layering cohort because the
+        defect only appeared once unrelated history was present to build
+        incoherent paths out of.
+        """
+        ctx = _make_ctx(full_df)
+        result = rule_detect(ctx, patterns=["layering"])
+        hits = _hits_for_rule(result.artifacts["rule_hits"], "R3")
+        assert hits, "R3 fired on nobody — the coherence check cannot be evaluated"
+
+        for h in hits:
+            ev = h["evidence"]
+            gaps = ev["hop_gap_hours"]
+            assert len(gaps) == ev["chain_length"] - 1
+            for g in gaps:
+                assert g > 0, f"{h['entity_id']}: hop runs backwards in time ({g}h)"
+                assert g <= ev["window_hours"], (
+                    f"{h['entity_id']}: {g}h gap exceeds the "
+                    f"{ev['window_hours']}h pass-through window"
+                )
+            amounts = ev["hop_amounts"]
+            for a, b in zip(amounts[:-1], amounts[1:]):
+                drift = abs(b - a) / a
+                assert drift <= ev["magnitude_tolerance"] + 1e-9, (
+                    f"{h['entity_id']}: {drift:.0%} amount drift exceeds the "
+                    f"±{ev['magnitude_tolerance']:.0%} tolerance"
+                )
+
+    def test_finds_the_generated_layering_chains(self, full_df: pd.DataFrame) -> None:
+        """R3 must find the chains the generator actually planted.
+
+        Chain origins used to be selected as in-degree-0 nodes over the whole
+        graph, and all five generated chains have origins with in-degree ≥ 1, so
+        none of them was ever searched — the rule reported four chains, all
+        false positives, and missed every real one.
+        """
+        ctx = _make_ctx(full_df)
+        result = rule_detect(ctx, patterns=["layering"])
+        flagged = {h["entity_id"] for h in _hits_for_rule(result.artifacts["rule_hits"], "R3")}
+        lay = set(full_df[full_df["pattern_label"] == "layering"]["sender_id"])
+        assert flagged & lay, "R3 found no member of the layering cohort"
+
 
 # ---------------------------------------------------------------------------
 # R4 — Rapid Cashout

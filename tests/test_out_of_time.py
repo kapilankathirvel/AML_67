@@ -245,11 +245,15 @@ def test_r6_is_reported_as_structurally_impossible(test_window, train_window, ca
 
 
 def test_r3_search_space_shrinks_as_the_window_grows(canonical, windows):
-    """The anti-monotonicity finding, pinned.
+    """Why R3's chain-origin definition had to change, pinned.
 
-    If R3's source selection is ever fixed, this test fails and the docstring
-    claiming R3 is anti-monotone has to be revisited with it — which is the
-    point of asserting a defect rather than only writing it down.
+    This measures the *data*, not the rule: how the in-degree-0 node set
+    collapses as history accumulates. R3 no longer selects origins that way —
+    it evaluates origin inside the pass-through window — so this is no longer a
+    statement about R3's behaviour. It is kept because it is the evidence that
+    motivated the change, and because the collapse it describes is exactly what
+    would happen again to any rule that defines an entry point as a global graph
+    property.
     """
     df, _ = canonical
     train_df, test_df, _ = windows
@@ -318,40 +322,42 @@ def test_counterfactual_whole_frame_row_matches_the_shipped_r3(payload):
     assert wf["entities_flagged"] == published["R3"]
 
 
-def test_counterfactual_recovers_chains_the_whole_frame_cannot_reach(payload):
-    """The finding, pinned: shorter windows flip R3 from all-wrong to all-right.
+def test_whole_frame_r3_finds_real_layering(payload):
+    """R3 on everything must be productive, not merely non-empty.
 
-    Whole-frame R3 flags nobody who is a launderer; the 7-day partition flags
-    only launderers, and the two sets are disjoint. If R3's origin selection is
-    ever fixed this test fails, which is the intent — the docstring's claim that
-    the fix is worth something concrete has to fall with it.
+    Before the origin fix this row read 4 flagged and zero true positives. It is
+    asserted rather than described because a rule that reports chains nobody
+    laundered through is worse than a rule that reports nothing: it costs an
+    analyst the review either way and teaches them to discount the rule.
+    """
+    wf = payload["r3_counterfactual"]["whole_frame"]
+    assert wf["entities_flagged"] > 0
+    assert wf["true_positives"] > 0
+    assert wf["precision"] >= 0.75, wf
+
+
+def test_r3_is_no_longer_anti_monotone_in_data_volume(payload):
+    """The regression test for the origin fix.
+
+    The defect was that re-cutting identical data into shorter windows made R3
+    *better* — 0.000 precision on the whole frame against 1.000 on 7-day
+    partitions, with disjoint hit sets. A windowed origin definition should make
+    the rule roughly indifferent to how the frame is partitioned, so no window
+    size may materially beat running it over everything.
+
+    The tolerance is not zero. Partitioning drops chains that straddle a
+    boundary, so the windowed rows move around a little; what must not come back
+    is a partition that wins by a wide margin, which is what a global origin
+    definition produces.
     """
     cf = payload["r3_counterfactual"]
-    wf = cf["whole_frame"]
-    seven = next(r for r in cf["windowed"] if r["window_days"] == 7)
-
-    assert wf["true_positives"] == 0
-    assert wf["precision"] == 0.0
-    assert seven["precision"] == 1.0
-    assert seven["true_positives"] == seven["entities_flagged"] > 0
-    # Disjoint: everything the 7-day arm finds is new, and everything the whole
-    # frame found is missed.
-    assert seven["new_vs_whole_frame"] == seven["entities_flagged"]
-    assert seven["missed_vs_whole_frame"] == wf["entities_flagged"]
-
-
-def test_counterfactual_precision_decays_as_windows_widen(payload):
-    """The mechanism confirming itself.
-
-    As each window approaches the whole frame the in-degree-0 origin set
-    collapses the same way, so precision should fall back toward the shipped
-    result. A non-monotone curve would mean something other than the search
-    space is driving the difference.
-    """
-    rows = sorted(payload["r3_counterfactual"]["windowed"], key=lambda r: r["window_days"])
-    precisions = [r["precision"] for r in rows]
-    assert precisions == sorted(precisions, reverse=True)
-    assert precisions[-1] > payload["r3_counterfactual"]["whole_frame"]["precision"]
+    whole = cf["whole_frame"]["precision"]
+    for r in cf["windowed"]:
+        assert r["precision"] <= whole + 0.10, (
+            f"{r['window_days']}-day partition beats the whole frame by "
+            f"{r['precision'] - whole:.3f} — the origin definition may have "
+            "regressed to a global graph property"
+        )
 
 
 def test_counterfactual_union_is_no_larger_than_the_sum_of_its_windows(payload):
@@ -421,6 +427,6 @@ def test_full_window_run_reproduces_the_published_rule_hits(payload):
     going through ablation.run_detection_stack, so this is the check that the
     two paths have not diverged.
     """
-    published = {"R1": 11, "R2": 3, "R3": 4, "R4": 8, "R5": 0, "R6": 0, "R7": 11}
+    published = {"R1": 11, "R2": 3, "R3": 6, "R4": 8, "R5": 0, "R6": 0, "R7": 11}
     actual = {r["rule"]: r["full_90d"] for r in payload["rule_reachability"]}
     assert actual == published

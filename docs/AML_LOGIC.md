@@ -165,19 +165,30 @@ strengthens the signal and is included in evidence.
 **Weight:** `0.80`  
 **Rule ID:** `R3`
 
-**Definition:** A directed transaction graph (built with `networkx`) contains a **simple path of
-length ≥ 3 hops** (i.e., ≥ 4 nodes: A→B→C→D) where each hop is a `wire` or `transfer`
-transaction and **each intermediate node has pass_through_ratio ≥ 0.70** (outflow within 48h of
-inflow, same magnitude ±30%). At least **1 hop must be cross-border** (`is_cross_border=True`).
+**Definition:** A **sequence of ≥ 3 hops** (i.e., ≥ 4 nodes: A→B→C→D) of `wire` or `transfer`
+transactions in which each hop occurs **strictly after** the hop before it, **within 48 hours** of
+it, and carries an amount **within ±30%** of it. **Each intermediate node must have
+pass_through_ratio ≥ 0.70**, and at least **1 hop must be cross-border**
+(`is_cross_border=True`). Funds must **enter the chain at the anchor**: the first sender received
+nothing in the 48 hours before sending.
 
 **Thresholds:**
 - Minimum chain length: `3 hops` (4 nodes)
+- Maximum chain length searched: `5 hops`
 - Transaction types allowed in chain: `wire`, `transfer`
 - `pass_through_ratio` per intermediate node: `≥ 0.70`
-- Pass-through window: `48 hours`
-- Pass-through magnitude tolerance: `±30%` of inbound amount
+- Hop-to-hop window: `48 hours`, strictly forward
+- Hop-to-hop magnitude tolerance: `±30%` of the preceding hop's amount
+- Chain origin: no inbound wire/transfer to the anchor in the preceding `48 hours`
 - Minimum cross-border hops: `1`
 - Feature signal: `pass_through_ratio ≥ 0.70` and `cross_border_ratio > 0`
+
+> **These constraints were documented here long before they were implemented.** Until the
+> forward-walk rewrite, R3 searched a static graph with time collapsed out of it and enforced
+> neither the window nor the tolerance, and it selected chain origins as nodes with in-degree 0
+> over the whole graph. All 4 chains it reported on `aml_sample.csv` ran out of chronological
+> order, spanned 32–71 days, drifted up to 5252% in amount, and none was a launderer, while all 5
+> generated layering chains went unsearched. See `evaluation/out_of_time.py` §3–§4.
 
 **pass_through_ratio definition:**  
 For a customer C in a 48h sliding window:
@@ -496,7 +507,10 @@ Window: sliding 48-hour windows, step = 1 hour.
 Formula: `min(received_48h, sent_48h) / max(received_48h, sent_48h)`  
 If both are zero: ratio = 0.0. The **maximum** ratio across all 48h windows is the feature value.  
 Magnitude tolerance for R3's chain detection: the outbound amount must be within ±30% of the
-inbound amount for the hop to count as pass-through.
+inbound amount for the hop to count as pass-through. That tolerance is applied by R3 itself, per
+hop, alongside the 48-hour forward-ordering constraint — see §3 R3. It was documented here for a
+long time before the rule enforced it; the feature above is a per-customer summary and was never
+a substitute for checking the chain.
 
 ---
 

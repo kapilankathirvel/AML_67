@@ -13,7 +13,7 @@ Output     : ToolResult.artifacts["rule_hits"] — list of hit dicts per Contrac
 Rules implemented (per AML_LOGIC.md §3):
   R1 — Structuring        (weight 0.85)
   R2 — Smurfing           (weight 0.75)
-  R3 — Layering           (weight 0.80, uses networkx)
+  R3 — Layering           (weight 0.80, forward walk over transactions)
   R4 — Rapid Cashout      (weight 0.75)
   R5 — High Velocity      (weight 0.65)
   R6 — Dormant Reactivation (weight 0.60)
@@ -26,11 +26,10 @@ No tool may import from backend.agent.* or from another tool.
 
 from __future__ import annotations
 
-import itertools
+import bisect
 import time
 from typing import Any, Optional
 
-import networkx as nx
 import numpy as np
 import pandas as pd
 
@@ -56,7 +55,7 @@ R3_MIN_CHAIN_LENGTH   = 3        # ≥ 3 hops (4 nodes) — AML_LOGIC.md §3 R3
 R3_PASS_THROUGH_MIN   = 0.70     # pass_through_ratio per intermediate node
 R3_MIN_CROSS_BORDER   = 1        # ≥ 1 cross-border hop in chain
 R3_CHAIN_TXN_TYPES    = {"wire", "transfer"}
-R3_WINDOW_HOURS       = 48
+R3_WINDOW_HOURS       = 48       # each hop must occur within 48h of the hop before it
 R3_MAGNITUDE_TOL      = 0.30     # ±30% outbound vs inbound amount
 # Search-safety constants (NOT part of the AML rule definition — purely
 # computational bounds to prevent combinatorial explosion on dense graphs):
@@ -65,11 +64,16 @@ R3_CUTOFF             = 5        # maximum hop depth (5 hops = 6 nodes).  AML_LO
                                   # headroom beyond the documented minimum without
                                   # exponential blow-up.  cutoff=8 was an undocumented
                                   # implementation choice that created O(E^8) worst-case.
-R3_MAX_PATHS_PER_PAIR = 50       # islice hard-cap: stop after 50 paths per (src,snk) pair
-R3_PAIR_BUDGET_SECS   = 0.20     # per-(src,snk) wall-clock budget — abort if exceeded
+R3_START_BUDGET_SECS  = 0.20     # per-chain-start wall-clock budget — abort if exceeded.
+                                  # Was R3_PAIR_BUDGET_SECS when the search enumerated
+                                  # (source, sink) pairs; it now bounds one forward walk.
 R3_MAX_GRAPH_NODES    = 500      # if the wire/transfer subgraph exceeds this many unique
                                   # nodes, skip the full path search (dataset too dense for
                                   # safe enumeration without structural pre-filtering)
+# R3_MAX_PATHS_PER_PAIR and R3_MAX_TXNS_PER_EDGE were removed with the pair
+# enumeration they bounded. The forward walk is bounded instead by the 48h
+# window (which truncates each node's candidate list), R3_CUTOFF, and the
+# per-start budget above.
 
 R4_MIN_INBOUND        = 10_000.0
 R4_MIN_CASH_OUTS      = 3
@@ -222,17 +226,46 @@ def _run_r3_layering(
     features: pd.DataFrame,
     _notes_out: list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """R3 — Layering: networkx chain of ≥ 3 hops with pass-through ≥ 0.70 and ≥ 1 cross-border hop.
+    """R3 — Layering: chain of ≥ 3 wire/transfer hops moving funds through intermediates.
 
-    Graph: directed weighted graph where edge A→B means A sent to B via wire/transfer.
-    For each simple path ≥ 4 nodes: check each intermediate node's pass_through_ratio ≥ 0.70
-    and that at least 1 edge is cross-border.
+    A chain is a sequence of real transactions, not a path through a graph. Each
+    hop must occur strictly after the one before it, within R3_WINDOW_HOURS of
+    it, and carry an amount within ±R3_MAGNITUDE_TOL of it. Every intermediate
+    must have pass_through_ratio ≥ R3_PASS_THROUGH_MIN, and at least
+    R3_MIN_CROSS_BORDER hop must be cross-border.
+
+    Two defects were found here by measurement and both are fixed:
+
+    1. The window and magnitude constraints were declared — in the constants
+       above and in AML_LOGIC.md — and never enforced. The rule accepted any
+       path through a graph with time collapsed out of it, having first reduced
+       each sender→receiver pair to its max-amount transaction. Measured on
+       aml_sample.csv, 4 of 4 reported chains ran out of chronological order,
+       spanning 32 to 71 days against the declared 48-hour window, with
+       hop-to-hop amounts drifting by up to 5252% against the declared ±30%.
+       Money that arrives at B in March cannot be the money B forwarded in
+       February. All 4 were false positives.
+
+    2. Chain origins were nodes with in-degree 0 in the whole-frame subgraph,
+       which made the rule anti-monotone in data volume — the origin set
+       collapses as history accumulates (46 such nodes over 29 days of
+       aml_sample.csv, 6 over 90). All 5 generated layering chains have origins
+       with in-degree ≥ 1, so none was ever searched. Origin is now a property
+       of the chain in time, not of the accumulated graph.
+
+    Strictly after, not at-or-after: an outflow stamped at the same instant as
+    its inflow cannot be evidenced as a pass-through of that inflow.
+
+    Depth-first over candidate continuations rather than greedy-earliest.
+    Choosing the earliest feasible transaction at each hop can strand a later
+    hop that a different choice would have satisfied, because the magnitude test
+    is relative to whichever transaction was chosen.
 
     Search safety bounds (see constants above):
       - Graph size guard: skip if > R3_MAX_GRAPH_NODES unique nodes in eligible set
-      - cutoff=R3_CUTOFF (5 hops) rather than 8 — documents maximum chain depth
-      - islice(MAX_PATHS_PER_PAIR) caps paths enumerated per (src,snk) pair
-      - Per-pair wall-clock budget of R3_PAIR_BUDGET_SECS seconds
+      - R3_CUTOFF (5) caps chain length; AML_LOGIC.md documents 3 as the minimum
+      - The 48h window truncates each node's candidate list during the walk
+      - Per-start wall-clock budget of R3_START_BUDGET_SECS seconds
     """
     hits: list[dict[str, Any]] = []
     notes = _notes_out if _notes_out is not None else []
@@ -270,143 +303,169 @@ def _run_r3_layering(
         return hits
 
     # ------------------------------------------------------------------
-    # Build directed graph vectorised — avoid iterrows() over all eligible rows.
-    # Collapse duplicate sender→receiver pairs, keeping the max-amount edge.
+    # Walk transactions forward in time rather than enumerating (source, sink)
+    # pairs over a static graph.
+    #
+    # The previous search picked chain origins as nodes with in-degree 0 in the
+    # whole-frame subgraph. That made the rule anti-monotone in data volume: the
+    # origin set collapses as history accumulates (measured on aml_sample.csv —
+    # 46 such nodes over 29 days, 6 over 90, with searched pairs falling from
+    # 2,300 to 42), and every one of the 5 generated layering chains has an
+    # origin with in-degree >= 1, so none of them was ever searched. On a
+    # production graph, where almost nobody has zero inbound wires, R3 would
+    # have had nowhere to begin at all.
+    #
+    # "Chain origin" cannot be a global graph property when the graph is a
+    # growing accumulation of history. It is a property of the chain: funds
+    # enter the chain at the anchor if the anchor did not itself receive within
+    # the pass-through window before sending. That definition does not decay as
+    # more history arrives, which is the whole point.
     # ------------------------------------------------------------------
-    G = nx.DiGraph()
-    edge_df = (
-        eligible[["sender_id", "receiver_id", "amount", "is_cross_border", "timestamp"]]
-        .sort_values("amount", ascending=False)          # max-amount edge comes first
-        .drop_duplicates(subset=["sender_id", "receiver_id"], keep="first")  # one edge per pair
-    )
-    for row in edge_df.itertuples(index=False):
-        G.add_edge(
-            row.sender_id, row.receiver_id,
-            amount=float(row.amount),
-            is_cross_border=bool(row.is_cross_border),
-            timestamp=row.timestamp,
-        )
+    eligible["timestamp"] = pd.to_datetime(eligible["timestamp"])
+    eligible = eligible.sort_values("timestamp")
+
+    window = pd.Timedelta(hours=R3_WINDOW_HOURS)
+
+    # Outbound adjacency, each sender's transactions in time order. Sorted so
+    # the walk can stop scanning a node as soon as it passes the window rather
+    # than filtering the whole list.
+    out_txns: dict[str, list[dict[str, Any]]] = {}
+    in_times: dict[str, list[pd.Timestamp]] = {}
+    for row in eligible[
+        ["sender_id", "receiver_id", "amount", "is_cross_border", "timestamp", "txn_type"]
+    ].itertuples(index=False):
+        out_txns.setdefault(row.sender_id, []).append({
+            "sender_id": row.sender_id,
+            "receiver_id": row.receiver_id,
+            "timestamp": row.timestamp,
+            "amount": float(row.amount),
+            "is_cross_border": bool(row.is_cross_border),
+            "txn_type": str(row.txn_type),
+        })
+        in_times.setdefault(row.receiver_id, []).append(row.timestamp)
 
     # Pass-through feature availability
     ppt_feat = "pass_through_ratio" in features.columns
 
-    # ------------------------------------------------------------------
-    # Restrict candidate src/snk nodes to plausible pass-through nodes.
-    # A node that will never appear as an intermediate (because it has
-    # pass_through_ratio < 0.70 in features) cannot be part of a valid
-    # chain — use this to trim the search space.
-    # Sources: in_degree=0 (no one sends to them in this subgraph)
-    # Sinks:   out_degree=0 (they don't forward)
-    # Intermediates must have pass_through_ratio ≥ threshold in features.
-    # ------------------------------------------------------------------
-    if ppt_feat:
-        # Nodes that CAN serve as intermediates (pass_through_ratio ok)
-        valid_intermediates: set[str] = {
-            str(cid) for cid in features.index
-            if float(features.loc[cid, "pass_through_ratio"]) >= R3_PASS_THROUGH_MIN
-        }
-    else:
-        # No feature data — all nodes are candidates (conservative)
-        valid_intermediates = set(G.nodes())
+    def _passes_through(node: str) -> bool:
+        """Can `node` serve as an intermediate — does it forward what it receives?"""
+        if not ppt_feat:
+            return True
+        if node not in features.index:
+            return False
+        return float(features.loc[node, "pass_through_ratio"]) >= R3_PASS_THROUGH_MIN
 
-    # Sources: in_degree=0 among graph nodes
-    sources = [n for n in G.nodes() if G.in_degree(n) == 0]
-    sinks   = [n for n in G.nodes() if G.out_degree(n) == 0]
-    # Fallback if graph is strongly connected
-    if not sources:
-        sources = list(G.nodes())
-    if not sinks:
-        sinks = list(G.nodes())
+    def _is_chain_origin(node: str, when: pd.Timestamp) -> bool:
+        """True if `node` received nothing in the window before sending at `when`.
+
+        This replaces in-degree 0. A node that received funds two months ago and
+        forwards them today is not where this chain begins, but it is also not
+        disqualified from ever originating one — which is exactly the property
+        the in-degree test got wrong.
+        """
+        arrivals = in_times.get(node)
+        if not arrivals:
+            return True
+        lo = bisect.bisect_left(arrivals, when - window)
+        hi = bisect.bisect_left(arrivals, when)
+        return lo == hi
 
     already_hit: set[str] = set()
-    pairs_timed_out = 0
+    starts_timed_out = 0
 
-    for src in sources:
-        for snk in sinks:
-            if src == snk:
+    def _extend(
+        hops: list[dict[str, Any]],
+        visited: set[str],
+        deadline: float,
+    ) -> list[dict[str, Any]] | None:
+        """Depth-first over coherent continuations; return the first valid chain."""
+        if len(hops) >= R3_MIN_CHAIN_LENGTH and sum(
+            1 for t in hops if t["is_cross_border"]
+        ) >= R3_MIN_CROSS_BORDER:
+            return hops
+        if len(hops) >= R3_CUTOFF:
+            return None
+
+        last = hops[-1]
+        node = last["receiver_id"]
+        # Extending means `node` becomes an intermediate, so it has to be one.
+        if not _passes_through(node):
+            return None
+
+        for nxt in out_txns.get(node, []):
+            if time.monotonic() > deadline:
+                return None
+            gap = nxt["timestamp"] - last["timestamp"]
+            if gap <= pd.Timedelta(0):
                 continue
-            # Skip pairs where no valid intermediate can exist on any path
-            # (quick reachability check: src must be able to reach a valid
-            # intermediate, and that intermediate must reach snk).  We
-            # approximate this cheaply by checking if src's successors
-            # contain at least one valid intermediate candidate.
-            if ppt_feat:
-                src_successors = set(G.successors(src))
-                if not src_successors.intersection(valid_intermediates):
-                    continue
+            if gap > window:
+                break          # sorted by time — everything after is later still
+            if last["amount"] <= 0:
+                continue
+            if abs(nxt["amount"] - last["amount"]) / last["amount"] > R3_MAGNITUDE_TOL:
+                continue
+            if nxt["receiver_id"] in visited:
+                continue       # simple path: no revisiting
+            found = _extend(hops + [nxt], visited | {nxt["receiver_id"]}, deadline)
+            if found is not None:
+                return found
+        return None
 
-            pair_deadline = time.monotonic() + R3_PAIR_BUDGET_SECS
-            try:
-                path_gen = nx.all_simple_paths(G, src, snk, cutoff=R3_CUTOFF)
-                for path in itertools.islice(path_gen, R3_MAX_PATHS_PER_PAIR):
-                    # Per-pair wall-clock budget
-                    if time.monotonic() > pair_deadline:
-                        pairs_timed_out += 1
-                        break
-
-                    if len(path) < R3_MIN_CHAIN_LENGTH + 1:
-                        continue
-
-                    # Check each intermediate node's pass_through_ratio
-                    intermediates = path[1:-1]
-                    if ppt_feat:
-                        ppt_ok = all(
-                            path_node in features.index
-                            and float(features.loc[path_node, "pass_through_ratio"]) >= R3_PASS_THROUGH_MIN
-                            for path_node in intermediates
-                        )
-                        if not ppt_ok:
-                            continue
-
-                    # Check ≥ 1 cross-border hop
-                    n_xb = sum(
-                        1 for a, b in zip(path[:-1], path[1:])
-                        if G[a][b].get("is_cross_border", False)
-                    )
-                    if n_xb < R3_MIN_CROSS_BORDER:
-                        continue
-
-                    # Build evidence for the chain anchor (source of chain)
-                    anchor = path[0]
-                    if anchor in already_hit:
-                        continue
-                    already_hit.add(anchor)
-                    hop_amounts = [G[a][b]["amount"] for a, b in zip(path[:-1], path[1:])]
-                    hop_types = [
-                        eligible[
-                            (eligible["sender_id"] == a) & (eligible["receiver_id"] == b)
-                        ]["txn_type"].iloc[0]
-                        if len(eligible[
-                            (eligible["sender_id"] == a) & (eligible["receiver_id"] == b)
-                        ]) > 0
-                        else "wire"
-                        for a, b in zip(path[:-1], path[1:])
-                    ]
-                    ppt_ratios = [
-                        float(features.loc[n, "pass_through_ratio"])
-                        if (ppt_feat and n in features.index) else 0.0
-                        for n in intermediates
-                    ]
-                    hits.append({
-                        "entity_id": anchor,
-                        "rule_id": "R3",
-                        "evidence": {
-                            "chain": path,
-                            "chain_length": len(path) - 1,
-                            "cross_border_hops": n_xb,
-                            "pass_through_ratios": [round(r, 3) for r in ppt_ratios],
-                            "hop_amounts": hop_amounts,
-                            "hop_types": hop_types,
-                        },
-                        "weight": 0.80,
-                    })
-            except (nx.NetworkXError, nx.exception.NetworkXNoPath):
+    for txns in out_txns.values():
+        for start in txns:
+            anchor = start["sender_id"]
+            if anchor in already_hit:
+                continue
+            if not _is_chain_origin(anchor, start["timestamp"]):
                 continue
 
-    if pairs_timed_out > 0:
+            deadline = time.monotonic() + R3_START_BUDGET_SECS
+            chain_txns = _extend(
+                [start], {anchor, start["receiver_id"]}, deadline
+            )
+            if time.monotonic() > deadline and chain_txns is None:
+                starts_timed_out += 1
+            if chain_txns is None:
+                continue
+
+            path = [anchor] + [t["receiver_id"] for t in chain_txns]
+            intermediates = path[1:-1]
+            already_hit.add(anchor)
+
+            n_xb = sum(1 for t in chain_txns if t["is_cross_border"])
+            ppt_ratios = [
+                float(features.loc[n, "pass_through_ratio"])
+                if (ppt_feat and n in features.index) else 0.0
+                for n in intermediates
+            ]
+            hits.append({
+                "entity_id": anchor,
+                "rule_id": "R3",
+                "evidence": {
+                    "chain": path,
+                    "chain_length": len(path) - 1,
+                    "cross_border_hops": n_xb,
+                    "pass_through_ratios": [round(r, 3) for r in ppt_ratios],
+                    "hop_amounts": [t["amount"] for t in chain_txns],
+                    "hop_types": [t["txn_type"] for t in chain_txns],
+                    # Added when hop ordering was enforced: an analyst reading a
+                    # chain has to be able to see that it runs forward, and by
+                    # how much.
+                    "hop_timestamps": [str(t["timestamp"]) for t in chain_txns],
+                    "hop_gap_hours": [
+                        round((b["timestamp"] - a["timestamp"]).total_seconds() / 3600.0, 2)
+                        for a, b in zip(chain_txns[:-1], chain_txns[1:])
+                    ],
+                    "window_hours": R3_WINDOW_HOURS,
+                    "magnitude_tolerance": R3_MAGNITUDE_TOL,
+                },
+                "weight": 0.80,
+            })
+
+    if starts_timed_out > 0:
         notes.append(
-            f"R3: {pairs_timed_out} (src,snk) pair(s) hit the {R3_PAIR_BUDGET_SECS}s "
-            "per-pair budget and were aborted — dense subgraph detected"
+            f"R3: {starts_timed_out} chain start(s) hit the {R3_START_BUDGET_SECS}s "
+            "search budget and were aborted — dense subgraph detected"
         )
 
     return hits

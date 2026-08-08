@@ -373,7 +373,7 @@ soc/
 | Backend | FastAPI + uvicorn, Pydantic v2 |
 | Agent core | Python — intent parser, planner, executor, narrator (no agent framework; the plan/execute/re-plan loop is hand-rolled and fully inspectable) |
 | LLM | Gemini, OpenAI, Groq, or **Ollama (local, no key/quota)** — one adapter, always with a regex fallback |
-| Data / detection | pandas, numpy, scikit-learn (IsolationForest, LOF), networkx (layering chains) |
+| Data / detection | pandas, numpy, scikit-learn (IsolationForest, LOF). networkx is now used only by `evaluation/out_of_time.py` — R3's layering search became a forward walk over transactions and no longer needs a graph library |
 | Frontend | Streamlit + Plotly |
 | Tests | pytest — 190+ tests |
 
@@ -513,11 +513,11 @@ differently for it. Cold starts add ~30s. If a host ever does run out of room, H
 gives 16 GB and Docker, and can run both processes as originally designed.
 
 **Continuous integration** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) is split by
-measurement, not intuition. The full suite is **427 tests in ~24 minutes**, and almost all of that sits
+measurement, not intuition. The full suite is **429 tests in ~21 minutes**, and almost all of that sits
 in seven files that drive the real feature pipeline — `feature_engineer` over 2,002 transactions costs
 ~27s, and several test classes pay it per test. So:
 
-- **On push and PR:** everything else — **291 tests in ~3½ minutes** (2m15s on a runner). Expressed as an *ignore* list, so
+- **On push and PR:** everything else — **293 tests in ~3½ minutes** (2m15s on a runner). Expressed as an *ignore* list, so
   a new test file joins the fast job automatically; a file silently skipped by CI is invisible, whereas
   one that makes the fast job slow is obvious the first time somebody waits for it.
 - **Nightly:** the full suite, plus `python -m scripts.check_baselines`, which regenerates
@@ -595,24 +595,24 @@ translated the same way, to a fair customer-level comparison.
 | | Flagged | Precision | Recall | False-positive rate |
 |---|---|---|---|---|
 | **Naive baseline** (any txn > $9,000) | 259 / 270 | 0.197 | 1.000 | 0.950 |
-| **Our system — any flag** (LOW/MEDIUM/HIGH) | 41 / 270 | 0.561 | 0.451 | 0.082 |
-| **Our system — HIGH only** (the SAR-draft tier) | 27 / 270 | 0.778 | 0.412 | 0.027 |
+| **Our system — any flag** (LOW/MEDIUM/HIGH) | 42 / 270 | 0.643 | 0.529 | 0.068 |
+| **Our system — HIGH only** (the SAR-draft tier) | 28 / 270 | 0.821 | 0.451 | 0.023 |
 
 **Broader ground truth (sender or receiver)**
 
 | | Flagged | Precision | Recall | False-positive rate |
 |---|---|---|---|---|
 | **Naive baseline** (any txn > $9,000) | 259 / 270 | 0.421 | 0.956 | 0.962 |
-| **Our system — any flag** (LOW/MEDIUM/HIGH) | 41 / 270 | 0.854 | 0.307 | 0.038 |
-| **Our system — HIGH only** (the SAR-draft tier) | 27 / 270 | 0.926 | 0.219 | 0.013 |
+| **Our system — any flag** (LOW/MEDIUM/HIGH) | 42 / 270 | 0.952 | 0.351 | 0.013 |
+| **Our system — HIGH only** (the SAR-draft tier) | 28 / 270 | 1.000 | 0.246 | 0.000 |
 
 **Repeat-receiver ground truth (sender, or received 2+)**
 
 | | Flagged | Precision | Recall | False-positive rate |
 |---|---|---|---|---|
 | **Naive baseline** (any txn > $9,000) | 259 / 270 | 0.313 | 0.964 | 0.957 |
-| **Our system — any flag** (LOW/MEDIUM/HIGH) | 41 / 270 | 0.829 | 0.405 | 0.038 |
-| **Our system — HIGH only** (the SAR-draft tier) | 27 / 270 | 0.926 | 0.298 | 0.011 |
+| **Our system — any flag** (LOW/MEDIUM/HIGH) | 42 / 270 | 0.929 | 0.464 | 0.016 |
+| **Our system — HIGH only** (the SAR-draft tier) | 28 / 270 | 1.000 | 0.333 | 0.000 |
 
 #### Why a third definition
 
@@ -691,7 +691,8 @@ losing trade, so it stands.
 
 Correcting the unit changed the ML feature matrix and therefore the published numbers: sender-side
 precision fell from 0.590 to 0.561 as two ML-only negatives crossed the 0.95 percentile floor into the
-LOW band. Recall, the HIGH tier, and every rule-driven flag are unchanged. The regression is reported
+LOW band. (Those figures are from the run at the time; the current sender-side precision is 0.643, after
+R3's repair moved every number in this section.) Recall, the HIGH tier, and every rule-driven flag are unchanged. The regression is reported
 rather than tuned away — the alternative was shipping a feature that contradicts its own name and
 [AML_LOGIC.md](docs/AML_LOGIC.md) §3 R5 in order to protect a metric.
 
@@ -714,13 +715,19 @@ from the thing being ablated. Scored sender-side unless stated.
 | Configuration | Flagged | HIGH | Precision | Recall | F1 |
 |---|---|---|---|---|---|
 | Naive baseline | 259 / 270 | — | 0.197 | 1.000 | 0.329 |
-| Rules only | 36 / 270 | **0** | 0.583 | 0.412 | 0.483 |
+| Rules only | 38 / 270 | **0** | 0.684 | 0.510 | 0.584 |
 | ML only | 13 / 270 | **0** | 0.692 | 0.176 | 0.281 |
-| Hybrid — shipped | 41 / 270 | 27 | 0.561 | 0.451 | 0.500 |
+| Hybrid — shipped | 42 / 270 | 28 | 0.643 | 0.529 | 0.581 |
 
-Two things worth saying out loud. **The hybrid is less precise than either component alone** (0.561 vs
-0.583 and 0.692) — it takes the union of their flags, so it inherits both sets of false positives. It wins
-on recall and F1, which is the trade being made, but "hybrid is better" is too coarse a claim to defend.
+Two things worth saying out loud. **The hybrid is less precise than either component alone** (0.643 vs
+0.684 and 0.692) — it takes the union of their flags, so it inherits both sets of false positives. What it
+buys is **recall**: 0.529 against 0.510 for rules alone.
+
+It no longer wins on F1. Before R3 was repaired the hybrid led (0.500 against 0.483); with the rules half
+now materially stronger, F1 is **0.581 hybrid against 0.584 rules-only** — a loss, well inside the noise
+of a 270-customer dataset, but a loss. On this static dataset the ML half now buys 0.019 of recall for
+0.041 of precision and nothing else, which is a *worse* trade than the earlier numbers described. The
+argument for keeping it is the evasion study below, not this table.
 
 **Neither component alone produces a single HIGH flag**, and that is structural rather than a property of
 this dataset: the largest rule weight is R1 at 0.85, so rules-only tops out at `0.6 × 0.85 × 100 = 51`,
@@ -760,10 +767,10 @@ miss?". Both are needed — a rule can score perfectly alone and contribute noth
 
 | Rule coeff | 0.0 | 0.2 | 0.4 | **0.6** | 0.8 | 1.0 |
 |---|---|---|---|---|---|---|
-| Flagged | 41 | 41 | 41 | **41** | 41 | 41 |
-| Precision | 0.561 | 0.561 | 0.561 | **0.561** | 0.561 | 0.561 |
-| Recall | 0.451 | 0.451 | 0.451 | **0.451** | 0.451 | 0.451 |
-| HIGH count | 30 | 32 | 27 | **27** | 29 | 36 |
+| Flagged | 42 | 42 | 42 | **42** | 42 | 42 |
+| Precision | 0.643 | 0.643 | 0.643 | **0.643** | 0.643 | 0.643 |
+| Recall | 0.529 | 0.529 | 0.529 | **0.529** | 0.529 | 0.529 |
+| HIGH count | 29 | 30 | 27 | **28** | 31 | 38 |
 
 **The fusion split cannot affect precision or recall at all** — not weakly, exactly. Membership in
 `risk_rows` is decided by the entity universe (*has a rule hit, or an ML percentile above the 0.95 floor*),
@@ -775,10 +782,10 @@ HIGH count does move, non-monotonically, which is the only thing worth tuning it
 
 | Threshold | 50 | 60 | 65 | **70** | 75 | 80 | 85 |
 |---|---|---|---|---|---|---|---|
-| HIGH flagged | 33 | 30 | 29 | **27** | 25 | 17 | 8 |
-| Precision | 0.636 | 0.700 | 0.724 | **0.778** | 0.840 | 0.941 | 1.000 |
-| Recall | 0.412 | 0.412 | 0.412 | **0.412** | 0.412 | 0.314 | 0.157 |
-| F1 | 0.500 | 0.519 | 0.525 | **0.538** | **0.553** | 0.471 | 0.271 |
+| HIGH flagged | 35 | 32 | 31 | **28** | 24 | 18 | 9 |
+| Precision | 0.743 | 0.750 | 0.774 | **0.821** | 0.917 | 0.944 | 1.000 |
+| Recall | 0.510 | 0.471 | 0.471 | **0.451** | 0.431 | 0.333 | 0.176 |
+| F1 | **0.605** | 0.578 | 0.585 | **0.582** | 0.587 | 0.493 | 0.300 |
 
 **75 dominates 70 on this data** — higher precision (0.840 vs 0.778), higher F1 (0.553 vs 0.538), and
 *identical* recall, because the two flags it drops are both false positives. The threshold is left at 70
@@ -810,27 +817,33 @@ changes the features, which changes both halves.
 
 | Move | What it costs the launderer | Rules | ML | Hybrid |
 |---|---|---|---|---|
-| Step below the $9,000 band | ~$497 per transaction | 0.524 | 0.667 | 0.609 |
-| Space transactions further apart | 41 days of mean delay | **0.048** | **0.889** | 0.391 |
-| Hold the cash-out past 24h | 48h on $1.30M of principal | 0.619 | **1.000** | 0.652 |
-| Move less money per transaction | 50% of all value | 0.381 | 0.667 | 0.609 |
-| **All three together** | $38k + 21 days + 48h | **0.095** | 0.778 | 0.391 |
+| Step below the $9,000 band | ~$497 per transaction | 0.615 | 0.667 | 0.667 |
+| Space transactions further apart | 41 days of mean delay | **0.192** | **0.889** | 0.481 |
+| Hold the cash-out past 24h | 48h on $1.30M of principal | 0.692 | **1.000** | 0.704 |
+| Move less money per transaction | 50% of all value | 0.500 | 0.667 | 0.667 |
+| **All three together** | $38k + 21 days + 48h | **0.231** | 0.778 | 0.481 |
 
 **This is the quantitative argument for the hybrid, and it is the one the ablation could not give.** On a
-static dataset the hybrid looked strictly worse than rules alone — less precise (0.561 vs 0.583) for more
-recall. Under an adversary the picture inverts: **timing evasion destroys the rules** (recall 0.412 → 0.020,
-retaining 4.8%) **and the ML half does not notice** (retaining 88.9%). Against the combined move the rules
-keep 9.5% and the hybrid keeps 39.1%. The hybrid retains more than the rules alone under **every** move
-tested. That is a robustness property, it is measured rather than asserted, and it is worth paying 0.022
-precision for.
+static dataset the hybrid looks strictly worse than rules alone — less precise (0.643 vs 0.684), and since
+R3 was repaired it no longer even wins on F1. Under an adversary the picture changes: **timing evasion
+guts the rules** (recall 0.510 → 0.098, retaining 19.2%) **and the ML half barely notices** (retaining
+88.9%). Against the combined move the rules keep 23.1% and the hybrid keeps 48.1%. The hybrid retains more
+than the rules alone under **every** move tested. That is a robustness property, measured rather than
+asserted, and it is what the 0.041 of precision is buying.
+
+> **This contrast used to be far starker, and repairing R3 weakened it.** Before the fix the rules half
+> retained 4.8% under timing evasion against the ML half's 88.9% — an 18× gap. It is now 19.2% against
+> 88.9%, a 4.6× gap. The direction is unchanged and the conclusion holds, but a stronger rules half is
+> harder to embarrass, and the honest reading is that the case for the ML half got *weaker* when the rules
+> got better. Reported rather than quietly re-baselined.
 
 Three things that must be said alongside it, or the table reads as more than it is:
 
 - **The retention ratios are not comparable across columns.** The ML half starts at 0.176 recall and the
-  rules at 0.412. "ML retains 0.889" is retention of a much smaller number — it degrades gently partly
+  rules at 0.510. "ML retains 0.889" is retention of a much smaller number — it degrades gently partly
   because it was never catching much to begin with. The defensible claim is the narrow one: **the two
   halves fail to different moves.** It is not a claim that the ML half is the better detector.
-- **In absolute terms everything degrades.** Hybrid recall under the combined move is 0.176 — 9 of 51. The
+- **In absolute terms everything degrades.** Hybrid recall under the combined move is 0.255 — 13 of 51. The
   system is more robust than its rules, not robust.
 - **The cheap evasion is not as cheap as the threshold suggests.** Stepping under the band costs a mean of
   $497 per transaction, not $1, because the in-band amounts average ~$9,495 and shaving to $8,999 forfeits
@@ -859,12 +872,12 @@ the **same ground truth**; only the ML half moves, one variable at a time:
 
 | Arm | Flagged | HIGH | Precision | Recall | F1 |
 |---|---|---|---|---|---|
-| Rules only — the floor, cannot degrade out of time | 16 | 0 | 0.438 | 0.583 | 0.500 |
-| **A.** fit on test, rank in test — *what ships* | 20 | 9 | 0.400 | 0.667 | 0.500 |
-| **B.** fit on train, rank in test | 22 | 9 | 0.364 | 0.667 | 0.471 |
-| **C.** fit on train, rank against train — *a deployed model* | 22 | 14 | 0.364 | 0.667 | 0.471 |
+| Rules only — the floor, cannot degrade out of time | 12 | 0 | 0.583 | 0.583 | 0.583 |
+| **A.** fit on test, rank in test — *what ships* | 16 | 8 | 0.500 | 0.667 | 0.571 |
+| **B.** fit on train, rank in test | 18 | 8 | 0.444 | 0.667 | 0.533 |
+| **C.** fit on train, rank against train — *a deployed model* | 18 | 11 | 0.444 | 0.667 | 0.533 |
 
-**Freezing the model costs 0.036 precision and no recall.** The transductive shortcut is buying very
+**Freezing the model costs 0.056 precision and no recall.** The transductive shortcut is buying very
 little, which is the useful finding: the design could be changed to a genuinely fitted-then-frozen model
 for roughly the price of one false positive, and the reason not to is simplicity rather than accuracy. B
 and C being identical says the damage, such as it is, comes from the fit rather than from freezing the cut
@@ -881,47 +894,70 @@ points — and those have completely different fixes.
 
 #### What this study found that it was not looking for
 
-**R3 reports more layering chains on 29 days of data (6) than on the full 90 (4).** A hit count that falls
-as evidence accumulates is not noise, and the cause is at `rules.py:311`: R3 enumerates paths only from
-nodes with **in-degree 0** to nodes with out-degree 0.
+The out-of-time split was built to test the ML half. It caught a defect in a *rule* instead, and then a
+second one underneath it. Both are now fixed; both are documented here because how they were found is the
+transferable part.
 
-| Window | Eligible txns | Nodes | Sources (in-deg 0) | Sinks (out-deg 0) | (src, snk) pairs searched | R3 hits |
-|---|---|---|---|---|---|---|
-| test, 29d | 362 | 242 | 46 | 50 | **2,300** | 6 |
-| train, 60d | 659 | 269 | 28 | 21 | 588 | 12 |
-| full, 89d | 1,021 | 270 | **6** | 7 | **42** | 4 |
+**The symptom: R3 reported more layering chains on 29 days of data (6) than on the full 90 (4).** A hit
+count that falls as evidence accumulates is not noise.
 
-**R3 is anti-monotone in data volume** — more history gives it a *smaller* search space, because a node
-that looked like a chain origin over 29 days has received something by day 90. Extrapolated to a production
-graph with years of history, virtually no customer has zero inbound wires and R3 has almost nowhere to
-begin. It would approach zero recall on exactly the datasets it matters on.
+**Defect 1 — R3 declared two constraints and enforced neither.** `R3_WINDOW_HOURS = 48` and
+`R3_MAGNITUDE_TOL = 0.30` sat in `rules.py` and were referenced nowhere in the codebase, and
+[AML_LOGIC.md](docs/AML_LOGIC.md) documented both as R3 chain properties. What the code did was collapse
+each sender→receiver pair to its largest transaction, build one static graph over the whole 89-day span,
+and accept any path through it:
 
-Reported rather than fixed: changing detection code would invalidate every baseline under
-`evaluation/results/`, which is a decision to take deliberately rather than as a side effect of adding a
-study. It is pinned by `tests/test_out_of_time.py::test_r3_search_space_shrinks_as_the_window_grows`, so
-whoever fixes it will be told that this section needs revisiting with it.
+| Anchor | Chain span | Hops chronological? | Worst hop-to-hop amount drift |
+|---|---|---|---|
+| C-N0060 | 66.8 days | no | 300% |
+| C-N0123 | 70.7 days | no | 87% |
+| C-N0182 | 32.5 days | no | 812% |
+| C-N0185 | 51.2 days | no | 5252% |
 
-**What the fix would be worth, measured rather than guessed.** The shipped `rule_detect` was run
-unchanged over non-overlapping partitions of the *same* transactions, with the R3 hits unioned. No
-detection code changes; this is a counterfactual, not a proposed implementation.
+**4 of 4** ran backwards in time against a declared 48-hour window. One has money "flowing" from a $346
+transfer in February into a $6,506 transfer the previous January. These were not chains — they were paths
+through a graph with time collapsed out of it, which is why **none of the four was a launderer**.
 
-| Config | Windows | Flagged | True positives | Precision | Recall | New vs whole frame | Missed |
-|---|---|---|---|---|---|---|---|
-| Whole frame — **what ships** | 1 | 4 | **0** | **0.000** | 0.000 | — | — |
-| 7-day windows | 13 | 3 | **3** | **1.000** | 0.059 | 3 | 4 |
-| 14-day windows | 7 | 7 | 4 | 0.571 | 0.078 | 7 | 4 |
-| 30-day windows | 3 | 15 | 4 | 0.267 | 0.078 | 14 | 3 |
+**Defect 2 — chain origin was a global graph property.** Origins were nodes with in-degree 0 in the
+wire/transfer subgraph, and that set collapses as history accumulates:
 
-**The shipped R3's 4 hits are all false positives; the 7-day variant's 3 are all launderers, and the two
-sets do not overlap.** So the in-degree-0 collapse is not merely shrinking R3's yield — it is leaving
-behind precisely the wrong chains. Precision goes 0.000 → 1.000 on identical data, and decays back toward
-the shipped result as the windows widen, which is the mechanism showing itself.
+| Window | Eligible txns | Nodes | Sources (in-deg 0) | Sinks (out-deg 0) | (src, snk) pairs searched |
+|---|---|---|---|---|---|
+| test, 29d | 362 | 242 | 46 | 50 | **2,300** |
+| train, 60d | 659 | 269 | 28 | 21 | 588 |
+| full, 89d | 1,021 | 270 | **6** | 7 | **42** |
 
-Two things this does not claim. Unioning hits across a hard partition is cruder than a real fix, which
-would evaluate chain origin within a rolling window and would have to decide what a chain spanning a
-boundary means. And recall stays low throughout — R3 is one typology, not the system — so the claim is
-about precision only. What it does establish is that fixing R3 is worth something concrete rather than
-speculative.
+R3 was **anti-monotone in data volume** — more history gave it a *smaller* search space. All five planted
+layering chains have origins with in-degree ≥ 1, so **not one was ever searched**. On a production graph,
+where effectively nobody has zero inbound wires, R3 would have had nowhere to begin.
+
+The two compound, and that is the part worth stating plainly: **one defect manufactured false positives
+while the other hid every true positive.** R3 was simultaneously reporting chains that never happened and
+blind to the ones that did.
+
+**The fix and what it cost.** Hops must now run strictly forward, within 48 hours and ±30% of the previous
+hop; origin is a property of the chain in time (the anchor received nothing in the window before sending),
+which does not decay as history arrives. The search became a forward walk over transactions instead of
+`all_simple_paths` over source/sink pairs, so R3 no longer needs `networkx` at all.
+
+| | Before | After |
+|---|---|---|
+| R3 hits / true positives | 4 / **0** | 6 / **5** |
+| R3 precision | 0.000 | **0.833** |
+| Removing R3 from the system | *improved* precision | **costs** 0.021 precision, 0.078 recall |
+| Rules-only precision / recall | 0.583 / 0.412 | **0.684 / 0.510** |
+| Hybrid precision / recall | 0.561 / 0.451 | **0.643 / 0.529** |
+
+R3 now finds all five planted chains. Every baseline under `evaluation/results/` was regenerated, and the
+counterfactual that used to demonstrate the defect is kept as its regression test: partitioning the data
+no longer beats running the rule over everything (0.800 / 0.800 / 0.833 across 7-, 14- and 30-day windows
+against 0.833 whole-frame), where it previously went 0.000 → 1.000.
+
+**Why this is the finding worth volunteering.** The defect was invisible from the outside. R3 passed every
+test, emitted well-formed evidence dictionaries, and showed up in the ablation as a merely weak rule. It
+took asking *"are these hops in chronological order?"* — a question nothing in the output invited — to see
+it. That is the same shape as the `velocity_txns_per_hour` unit bug: **the rule's documented definition
+and the code's actual behaviour had diverged, and every test asserted the code against itself.**
 
 ## Limitations
 
@@ -966,17 +1002,17 @@ speculative.
   ownership, KYC linkage, or device/IP overlap.
 - **The ML half is transductive: it fits and scores the same rows** (`ml_detect.py:256`). Defensible for
   unsupervised scoring, and [measured rather than argued](#out-of-time-validation-does-the-ml-half-generalise-forward)
-  — fitting on the first 60 days and scoring the last 29 costs 0.036 precision and no recall. Two caveats
+  — fitting on the first 60 days and scoring the last 29 costs 0.056 precision and no recall. Two caveats
   bound that number: this dataset has no customers absent from the training window, so cold-start cost is
   unmeasured, and `LocalOutlierFactor` is constructed with `novelty=False`, meaning **the shipped
   `ml_detect` cannot score unseen rows at all** — the study substitutes `novelty=True` and reports an
   IsolationForest-only control to show the substitution is not carrying the result.
-- **R3's recall degrades as the dataset grows.** It enumerates layering chains only from in-degree-0 nodes,
-  and that set shrinks with history: 46 such nodes over 29 days, 6 over 90. On a production graph it would
-  have almost nowhere to start. Worse, its 4 current hits are *all* false positives while a windowed
-  counterfactual over the same data finds 3 entities that are all launderers — the collapse is selecting
-  the wrong chains, not just fewer of them. Known, measured, and deliberately not yet fixed — see
-  [above](#what-this-study-found-that-it-was-not-looking-for).
+- **Only two of the seven rules have been audited against their own documented definition, and both were
+  wrong.** R5's feature was a daily average wearing an hourly name; R3 declared a 48-hour window and a
+  ±30% tolerance in its constants and enforced neither. Both are fixed, but the hit rate is the point: the
+  question *"does this rule do what its documentation says?"* has been asked of two rules and found a
+  defect in both. R1, R2, R4, R6 and R7 have never been asked it, and nothing in a passing test suite
+  would reveal the answer — see [above](#what-this-study-found-that-it-was-not-looking-for) for why.
 - Batch analysis over a sample dataset, not live streaming — explicitly in scope per the brief.
 - Synthetic data documents its own generation assumptions (seed, thresholds, ring sizes) in
   [DATA_CARD.md](docs/DATA_CARD.md) — real-world deployment would need those revalidated against production

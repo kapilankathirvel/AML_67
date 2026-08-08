@@ -173,56 +173,64 @@ the repeat-receiver definition its precision is **1.000**, and removing it costs
 wrong thing.** Reporting only the sender-side column would have been defensible, reproducible, and
 wrong. Every rule is now scored under both.
 
-### R3 is the one genuinely underperforming rule
+### R3: two defects found by measurement, both fixed
 
-4 hits, zero true positives, and removing it improves precision at no recall cost. It is **kept**
-anyway: 4 hits is far too small a sample to retire a rule on, and the layering typology is real. But
-it is on the record rather than hidden inside an aggregate.
+R3 used to report **4 layering chains, zero of them true positives**, and removing it *improved*
+precision. It is now **6 chains at 0.833 precision**, finding all five chains the generator planted.
+Two independent defects were behind the old number, and separating them mattered more than fixing
+them.
 
-**And the out-of-time study found out why it only gets 4.** R3 enumerates chains only from nodes with
-**in-degree 0** in the wire/transfer subgraph (`rules.py:311`). That set shrinks as history
-accumulates, because a node that looked like a chain origin over 29 days has received something by day
-90:
+**Defect 1 — the rule declared two constraints and enforced neither.** `R3_WINDOW_HOURS = 48` and
+`R3_MAGNITUDE_TOL = 0.30` sat in `rules.py` and were referenced nowhere in the codebase.
+[AML_LOGIC.md §3](AML_LOGIC.md) documented both. What the code actually did was collapse each
+sender→receiver pair to its single largest transaction, build one static graph over the whole 89-day
+span, and accept any path through it. Measured on the reported chains:
 
-| Window | Eligible txns | Sources (in-deg 0) | Sinks | Pairs searched | R3 hits |
-|---|---|---|---|---|---|
-| 29 days | 362 | 46 | 50 | 2,300 | 6 |
-| 60 days | 659 | 28 | 21 | 588 | 12 |
-| 89 days | 1,021 | **6** | 7 | **42** | 4 |
-
-**R3 is anti-monotone in data volume.** More evidence gives it a smaller search space. The 4 hits are
-not a rule that is bad at layering — they are a rule that had 42 candidate pairs left to search out of
-a possible 2,300. On a production graph with years of history, effectively nobody has zero inbound
-wires and R3 would have nowhere to start at all.
-
-If you are asked one question about the rules, this is the one worth volunteering. It is a concrete,
-mechanical, scale-dependent defect, and the fix is not a threshold — it is that "chain origin" cannot
-be defined as a global graph property when the graph is a growing accumulation of history. It needs
-to be defined within a time window, which is a design change rather than a tuning change.
-
-**And the counterfactual says what that change would be worth.** The shipped `rule_detect`, run
-unchanged over non-overlapping partitions of the same transactions with R3's hits unioned:
-
-| Config | Flagged | True positives | Precision |
+| Anchor | Chain span | Hops in order? | Worst hop-to-hop amount drift |
 |---|---|---|---|
-| Whole frame — what ships | 4 | **0** | **0.000** |
-| 7-day windows | 3 | **3** | **1.000** |
-| 14-day windows | 7 | 4 | 0.571 |
-| 30-day windows | 15 | 4 | 0.267 |
+| C-N0060 | 66.8 days | no | 300% |
+| C-N0123 | 70.7 days | no | 87% |
+| C-N0182 | 32.5 days | no | 812% |
+| C-N0185 | 51.2 days | no | 5252% |
 
-The two sets are **disjoint**: every entity the whole-frame run flags is a false positive, every
-entity the 7-day partition flags is a launderer, and no entity appears in both. The origin collapse
-is not merely reducing R3's yield — it is selecting the wrong chains. Precision decays monotonically
-as the windows widen back toward the whole frame, which is the mechanism confirming itself.
+**4 of 4** ran out of chronological order against a declared 48-hour window. One chain has money
+"flowing" from a $346 transfer in February into a $6,506 transfer the previous January. These were
+not chains at all — they were arbitrary paths through a graph with time collapsed out of it, which
+is why none of them was a launderer.
 
-That is a counterfactual, not an implementation: unioning over a hard partition is cruder than a real
-fix, and recall stays low throughout because R3 is one typology rather than the system. The claim is
-about precision only.
+**Defect 2 — chain origin was a global graph property.** Origins were nodes with **in-degree 0** in
+the wire/transfer subgraph, and that set collapses as history accumulates:
 
-It is **deliberately not fixed yet**: changing detection code invalidates every baseline under
-`evaluation/results/`, and that is a decision to take on its own rather than as a side effect of
-adding a study. The counterfactual does not change that sequencing argument, but it does mean the fix
-is now a costed item rather than a hunch.
+| Window | Eligible txns | Sources (in-deg 0) | Sinks | Pairs searched |
+|---|---|---|---|---|
+| 29 days | 362 | 46 | 50 | 2,300 |
+| 60 days | 659 | 28 | 21 | 588 |
+| 89 days | 1,021 | **6** | 7 | **42** |
+
+R3 was **anti-monotone in data volume** — more evidence gave it a *smaller* search space. All five
+generated layering chains have origins with in-degree ≥ 1, so **not one of them was ever searched**.
+On a production graph, where effectively nobody has zero inbound wires, R3 would have had nowhere to
+begin.
+
+The two defects compound, and that is the part worth saying out loud: one manufactured false
+positives, the other hid every true positive. The rule was simultaneously reporting chains that never
+happened and blind to the ones that did.
+
+**The fixes.** Hop ordering and magnitude continuity are now enforced per hop. Chain origin is a
+property of the chain in time — funds enter at the anchor if the anchor received nothing within the
+48-hour window before sending — which does not decay as history arrives. The search is a forward walk
+over transactions rather than `all_simple_paths` over (source, sink) pairs, so `networkx` is no
+longer needed here at all, and two search-bound constants went with the enumeration they bounded.
+
+**What it cost and what it bought.** Every baseline under `evaluation/results/` was regenerated.
+Rules-only precision went 0.583 → 0.684 and recall 0.412 → 0.510; the hybrid went 0.561 → 0.643 and
+0.451 → 0.529. R3's own ablation verdict reversed: removing it now *costs* 0.021 precision and 0.078
+recall, where it used to be free to delete.
+
+If you are asked one question about the rules, this is the one worth volunteering — not because the
+fix is clever, but because the defect was invisible. R3 passed every test, produced plausible-looking
+evidence dictionaries, and appeared in the ablation as a merely weak rule. It took asking *"are the
+hops in chronological order?"* to see it, and nothing about the output invited that question.
 
 ---
 
@@ -517,14 +525,11 @@ In priority order, with the reason rather than just the task:
 1. **Run the IBM path.** It is built and blocked only on a Kaggle token. It converts every metric in
    the repo from "measured on data we generated" to "measured on data we did not", and it is the one
    criticism I cannot currently answer.
-2. **Fix R3's chain-origin definition.** The out-of-time study showed it is anti-monotone in data
-   volume — 46 in-degree-0 nodes over 29 days, 6 over 90 — so on production data it would find nearly
-   nothing. "Chain origin" has to be evaluated inside a time window rather than over the whole graph.
-   This is now the most concrete known defect in the detection code, and unlike the receive-only gap it
-   has a fix that does not need data the dataset lacks. It is also **costed**: a windowed counterfactual
-   over the same transactions takes R3 from 4 hits at 0.000 precision to 3 hits at 1.000, with no
-   overlap between the two sets. The bill is re-baselining four JSON files under `evaluation/results/`
-   and rewriting the numbers in three documents.
+2. **Audit the other five rules the way R3 was audited.** R3 declared two constraints in its own
+   constants, enforced neither, and nothing in its output revealed that — it took reading the
+   timestamps of the chains it reported. R5's unit bug was the same shape. The question *"is the
+   definition this rule documents the one the code applies?"* has now caught defects in two of seven
+   rules, and the other five have never been asked it. That is worth more than tuning any threshold.
 3. **Inbound and graph features.** The 51 unreachable receive-only positives are a feature-coverage
    problem, not a threshold problem, and no amount of tuning will move them.
 4. **Revisit the HIGH threshold on real data**, where the tuning set and the evaluation set can

@@ -56,7 +56,7 @@ _VOLATILE = {"run_metadata"}
 # most recent published record rather than a file named "baseline" -- see
 # docs/AFTER_THE_DEADLINE.md for why the earlier ones are kept.
 STUDIES: list[tuple[str, str, Path]] = [
-    ("evaluation", "evaluation.run_evaluation", _RESULTS / "after_repeat_receiver_gt.json"),
+    ("evaluation", "evaluation.run_evaluation", _RESULTS / "after_r3_fix.json"),
     ("ablation", "evaluation.ablation", _RESULTS / "ablation.json"),
     ("evasion", "evaluation.evasion", _RESULTS / "evasion.json"),
     ("out_of_time", "evaluation.out_of_time", _RESULTS / "out_of_time.json"),

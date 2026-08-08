@@ -471,11 +471,16 @@ $9,000" — that naive rule flags 96% of customers in the demo dataset. It requi
 sub-threshold activity concentrated in a short window, as a proportion of that customer's behaviour. This
 is the single largest source of the system's false-positive reduction.
 
-**R3 has explicit computational guards.** Graph traversal over a wire/transfer subgraph is the one place
-this pipeline can blow up combinatorially, so layering detection is bounded on four axes: maximum hop
-depth of 5, at most 50 paths per source/sink pair, a 0.20s per-pair wall-clock budget, and a 500-node
-ceiling on the subgraph before traversal is abandoned. These are cost controls, not detection logic — but
-without them a dense dataset makes the query hang rather than return.
+**R3 has explicit computational guards.** Chain search is the one place this pipeline can blow up
+combinatorially, so layering detection is bounded on three axes: maximum hop depth of 5, a 0.20s
+wall-clock budget per chain start, and a 500-node ceiling on the wire/transfer subgraph before the search
+is abandoned. The 48-hour window does most of the work by itself, since it truncates each node's
+candidate continuations. These are cost controls, not detection logic — but without them a dense dataset
+makes the query hang rather than return.
+
+> The search used to enumerate `all_simple_paths` between (source, sink) pairs, which needed two further
+> caps — 50 paths per pair and 25 transactions per edge. Both went away with the pair enumeration when
+> chain origin became a windowed property; see [AFTER_THE_DEADLINE.md](AFTER_THE_DEADLINE.md).
 
 **Weights are calibrated to evidence strength, not pattern severity.** R1 carries the highest weight
 (0.85) because sub-threshold clustering is close to unambiguous. R6 carries the lowest (0.60) because

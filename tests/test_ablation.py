@@ -29,7 +29,11 @@ from evaluation.ablation import (
 from evaluation.harness import load_ground_truth
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-_BASELINE = _REPO_ROOT / "evaluation" / "results" / "after_repeat_receiver_gt.json"
+# The live baseline is the newest snapshot in evaluation/results/, not a file
+# literally named "baseline" — the earlier ones record what the system produced
+# at a point in time and are never regenerated. Keep this in step with
+# scripts/check_baselines.py, which is what CI diffs against.
+_BASELINE = _REPO_ROOT / "evaluation" / "results" / "after_r3_fix.json"
 
 
 def _hits(*specs):
@@ -211,4 +215,10 @@ def test_ablation_agrees_with_the_published_evaluation():
     rows = fuse(rule_hits, ml_scores)
 
     assert len(rows) == expected["flagged"]
-    assert sum(1 for r in rows if r["risk_level"] == "high") == 27
+    # Read from the baseline rather than hardcoded: this assertion broke on the
+    # R3 repair because the HIGH count was written into the test, so a correct
+    # detection change looked like a test failure.
+    assert (
+        sum(1 for r in rows if r["risk_level"] == "high")
+        == baseline["results"]["sender_only"]["high_only"]["flagged"]
+    )

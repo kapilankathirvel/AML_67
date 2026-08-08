@@ -4,7 +4,7 @@
 
 This project was built for a 48-hour hackathon. Work continued after the deadline, and most of what
 now makes the system interesting was not in the submission. This document draws that line honestly,
-because the difference is the point: the submission worked, and it was also wrong in two ways nobody
+because the difference is the point: the submission worked, and it was also wrong in three ways nobody
 had noticed.
 
 Every claim here is checkable with `git log`.
@@ -33,8 +33,10 @@ The post-deadline work is solo and crosses both tracks.
 
 ## What was wrong with the submission
 
-This section comes first deliberately. Both defects were live in the code that was judged, both were
-found afterwards by re-reading my own work, and neither produced an error message.
+This section comes first deliberately. All three defects were live in the code that was judged, all
+three were found afterwards by re-reading the submission, and none produced an error message. They are
+the same shape: **a documented definition and a code path that had quietly diverged**, with every test
+asserting the code against itself.
 
 ### The risk score depended on how the analyst phrased their query
 
@@ -79,6 +81,48 @@ two ML-only negatives crossed the percentile floor. That regression is reported 
 away. The alternative was shipping a feature that contradicts its own name in order to protect a
 metric.
 
+### R3 reported layering chains that never happened
+
+`_run_r3_layering` declared a 48-hour pass-through window (`R3_WINDOW_HOURS`) and a ±30% magnitude
+tolerance (`R3_MAGNITUDE_TOL`) in its constants. [AML_LOGIC.md](AML_LOGIC.md) documented both as
+properties of an R3 chain. **Neither constant was referenced anywhere in the codebase.**
+
+What the code did instead was reduce every sender→receiver pair to its single largest transaction,
+build one static graph across the whole 89-day span, and accept any path through it. So the four
+chains it reported were not chains:
+
+| Anchor | Chain span | Hops in chronological order? | Worst hop-to-hop amount drift |
+|---|---|---|---|
+| C-N0060 | 66.8 days | no | 300% |
+| C-N0123 | 70.7 days | no | 87% |
+| C-N0182 | 32.5 days | no | 812% |
+| C-N0185 | 51.2 days | no | 5252% |
+
+**4 of 4 ran backwards in time.** One has money "flowing" from a $346 transfer in February into a
+$6,506 transfer the previous January. None of the four was a launderer, and that is not a coincidence
+— an arbitrary path through a time-collapsed graph has no reason to land on one.
+
+Underneath it sat a second defect. Chain origins were nodes with **in-degree 0** in the wire/transfer
+subgraph, a set that collapses as history accumulates: 46 such nodes over 29 days, 28 over 60, **6**
+over the full 90, with the searched pair count falling from 2,300 to 42. All five planted layering
+chains have origins with in-degree ≥ 1, so **not one of them was ever searched**. The rule was
+anti-monotone in data volume: more evidence, smaller search space.
+
+The two compound. One manufactured false positives; the other hid every true positive.
+
+Both are fixed. Hops must run strictly forward, within 48 hours and ±30% of the previous hop, and
+origin is now a property of the chain in time rather than of the accumulated graph. R3 went from
+**4 hits and zero true positives to 6 hits at 0.833 precision**, finding all five planted chains, and
+its ablation verdict reversed: removing it used to *improve* precision and now costs 0.021 precision
+and 0.078 recall. Rules-only went 0.583 → 0.684 precision and 0.412 → 0.510 recall; the hybrid went
+0.561 → 0.643 and 0.451 → 0.529. Every baseline under `evaluation/results/` was regenerated.
+
+This one was found by the out-of-time study, which was not looking for it — the tell was R3 reporting
+*more* chains on 29 days of data than on 90. The transferable lesson is in how invisible it was: R3
+passed every test, emitted well-formed evidence, and appeared in the ablation as a merely weak rule.
+It took asking *"are these hops in chronological order?"*, and nothing in the output invited that
+question.
+
 ---
 
 ## What was added
@@ -112,22 +156,24 @@ The most useful output of the post-deadline work is the list of things that turn
   average of 6.9**, and within any 48-hour window both top out at 4. There is no separation to
   threshold on. The rule was never built.
 - **Noisy-OR fusion would have changed nothing.** Combining rule weights probabilistically only helps
-  when rules corroborate each other, so I counted first: 37 rule hits land on 36 distinct entities,
-  and exactly **one** — C-HUB01, on R1 and R2 — triggers more than one rule. There is nothing to
-  combine, and zero customers would move across a band. Also never built.
+  when rules corroborate each other, so I counted first: at the time, 37 rule hits landed on 36
+  distinct entities, and exactly **one** — C-HUB01, on R1 and R2 — triggered more than one rule. There
+  was nothing to combine, and zero customers would have moved across a band. Also never built. (R3's
+  repair since took the totals to 39 hits on 38 entities; the argument is unchanged.)
 - **The re-planning loop declines to intervene.** Across five queries through the full pipeline it
   produced a decision on 5/5 and **declined to revise on every one**; outcomes differed on 0/5. That
   is correct behaviour — the model plans well enough up front that by the time it sees the
   observation there is nothing to fix — and manufacturing a scenario where it fires would have been
   easy and dishonest.
 - **The fusion weights cannot affect precision or recall.** Not weakly — *exactly*. Sweeping
-  `RULE_WEIGHT_COEFF` from 0.0 to 1.0 leaves precision at 0.561 and recall at 0.451 throughout,
+  `RULE_WEIGHT_COEFF` from 0.0 to 1.0 leaves precision at 0.643 and recall at 0.529 throughout,
   because membership in the flagged set is decided by the entity universe and never consults the
   coefficients. The documented 0.6/0.4 split is a **banding** decision alone.
-- **The hybrid is less precise than either half.** 0.561, against 0.583 for rules-only and 0.692 for
-  ML-only. It takes the union of their flags and inherits both sets of false positives. It wins on
-  recall and F1 — that is the actual trade, and it is more defensible than claiming the hybrid is
-  simply better. See the next section for the axis on which that trade is actually won.
+- **The hybrid is less precise than either half.** 0.643, against 0.684 for rules-only and 0.692 for
+  ML-only. It takes the union of their flags and inherits both sets of false positives. It buys recall
+  — 0.529 against 0.510 — and since R3's repair strengthened the rules half it no longer wins on F1
+  either (0.581 against 0.584). On a static dataset the ML half is now a *worse* trade than it looked
+  before. See the next section for the axis on which that trade is actually won.
 - **A small local model is not the bottleneck the architecture is.** The same planner scores **27% on
   a local 3B and 93% on a hosted model**, same validator, same prompts, same queries. The 3B result
   was kept deliberately: pushing it from 20% to 27% is what produced V12, V13 and the `load_data`
@@ -147,15 +193,19 @@ $9,000 band R1 keys on is the *previous* move in a game that is still being play
 
 So the evasion study perturbs the launderers' own transactions in memory and asks what each rule
 costs to defeat. **Timing evasion effectively destroys the rules half** — spacing transactions
-further apart takes rule recall from 0.412 to 0.020, retaining 4.8% — **and the ML half barely
-registers it**, retaining 88.9%. Against all the moves used together the rules keep 9.5% and the
-hybrid keeps 39.1%. The hybrid retains more than the rules alone under every move tested.
+further apart takes rule recall from 0.510 to 0.098, retaining 19.2% — **and the ML half barely
+registers it**, retaining 88.9%. Against all the moves used together the rules keep 23.1% and the
+hybrid keeps 48.1%. The hybrid retains more than the rules alone under every move tested.
+
+That contrast used to be starker: before R3 was repaired the rules retained 4.8% against the ML
+half's 88.9%, an 18× gap rather than today's 4.6×. Fixing a rule made the argument for the ML half
+weaker, which is worth stating rather than quietly re-baselining.
 
 That is what the 0.022 of precision buys, and it is now a measured number rather than an assertion.
 Three caveats are published with it rather than left for someone else to find: the retention ratios
 are computed against each half's own baseline and are not comparable to each other (the ML half
-starts at 0.176 recall, the rules at 0.412); everything degrades in absolute terms, with hybrid
-recall under the combined move at 9 of 51 customers; and stepping under the $9,000 band costs a mean
+starts at 0.176 recall, the rules at 0.510); everything degrades in absolute terms, with hybrid
+recall under the combined move at 13 of 51 customers; and stepping under the $9,000 band costs a mean
 of $497 per transaction rather than the $1 the threshold's placement implies, because the in-band
 amounts average around $9,495.
 
@@ -176,21 +226,13 @@ Stated here so it does not have to be discovered:
   outbound behaviour. Their median ML percentile is **0.486**, and only 2 of the 63 clear the 0.95
   floor. R7 recovers 12. Closing the rest needs features that describe inbound or graph structure,
   which is a different thing from tuning a threshold.
-- **R3 (layering) is broken in a way that gets worse with more data.** 4 hits, zero true positives,
-  and removing it *improves* precision at no recall cost — but the out-of-time study found the
-  mechanism, and it is not that layering is hard to detect. R3 enumerates chains only from nodes with
-  in-degree 0, and that set collapses as history accumulates: **46 such nodes over 29 days, 28 over
-  60, 6 over the full 90.** The searched pair count falls from 2,300 to 42. The rule is anti-monotone
-  in data volume, so on a production graph where nobody has zero inbound wires it would find nothing
-  at all. And a counterfactual — the shipped rule run unchanged over non-overlapping partitions of
-  the same transactions — shows the collapse is picking the *wrong* chains rather than merely fewer:
-  the whole-frame run's 4 hits contain **zero** launderers, the 7-day partition's 3 hits are **all**
-  launderers, and the two sets do not overlap. Precision 0.000 → 1.000 on identical data. Reported
-  and pinned by tests, deliberately not yet fixed — changing detection code invalidates every
-  baseline under `evaluation/results/`, which should be a decision rather than a side effect of
-  adding a study. It is now a costed decision rather than a speculative one.
+- **Five of the seven rules have never been audited against their own documented definition.** The two
+  that have — R5 and R3 — were both wrong, in the same way: the documentation described behaviour the
+  code did not implement, and every test asserted the code against itself. Two for two is not a
+  reassuring hit rate, and R1, R2, R4, R6 and R7 have not been asked the question. This is the
+  cheapest remaining work in the repo and the most likely to find something.
 - **The ML half is transductive, and the cost of that is now measured rather than unknown.** Fitting
-  on the first 60 days and scoring the last 29 costs **0.036 precision and no recall**, so the
+  on the first 60 days and scoring the last 29 costs **0.056 precision and no recall**, so the
   shortcut is buying very little. Two things bound that number: this dataset has no customers absent
   from the training window, so cold-start cost goes unmeasured; and the shipped `ml_detect` cannot do
   out-of-time scoring at all, because `LocalOutlierFactor` is constructed with `novelty=False` and has
